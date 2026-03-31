@@ -223,7 +223,7 @@ MOVE Index_ret:     float64
 ... (demais 27 séries de índices)
 ```
 
-**Resultado:** $d_{ts} = 36$ (1 retorno + 6 fundamentais + 29 índices). 956 tickers no total, 841 no período de treino.
+**Resultado:** $d_{ts} = 38$ (1 retorno + 8 fundamentais + 29 índices). 956 tickers no total, 841 no período de treino.
 
 O arquivo `parquets/prices.parquet` é uma cópia de `cleaned/prices.parquet` para consumo direto pelo dataset loader (cálculo do retorno-alvo $r_{i,t+1}$).
 
@@ -316,27 +316,174 @@ TCC Data Cleaning/
 
 ---
 
-## 7. Como o Dataset Loader Consome os Parquets
+## 7. Como o StockEmbedder Deve Ler os Parquets Finais
 
-Fluxo do `NeuralFactorsDataset.__getitem__(idx)`:
+Esta seção descreve de forma concreta como o código de treinamento deve carregar e transformar os artefatos de `parquets/` nos tensores consumidos pelo modelo.
 
+### 7.1 Carregamento e Pré-Indexação
+
+```python
+import pandas as pd
+import numpy as np
+import json
+import torch
+
+# ── Carregar os 4 artefatos ──
+x_ts     = pd.read_parquet("parquets/x_ts.parquet")      # (1.7M rows × 40 cols)
+x_static = pd.read_parquet("parquets/x_static.parquet")  # (956 rows × 12 cols)
+prices   = pd.read_parquet("parquets/prices.parquet")     # (1.7M rows × 3 cols)
+
+with open("parquets/normalization_stats.json") as f:
+    stats = json.load(f)
+
+feature_cols = stats["feature_order"]   # lista ordenada de 38 features
+d_ts         = stats["d_ts"]            # 38
 ```
-idx → date_t
 
-1. Selecionar todos os tickers presentes em date_t no x_ts
-   (universo implícito: se tem retorno válido, está no universo)
+A coluna `return` dentro de `x_ts` já é o retorno normalizado $r_{i,t}/\sigma_{train}$ — ela é usada como **feature de input** no lookback, não como target. O target $r_{i,t+1}$ deve ser calculado a partir de `prices.parquet`.
 
-2. Para cada ticker i:
-   a. Buscar as L = 256 datas anteriores em x_ts onde ticker = i existe
-   b. Se < 256 dias de histórico → excluir (mask = False)
-   c. Montar S[i, :, :] = x_ts[ticker=i, dates=t-L:t, features]  → [L, d_ts]
-   d. Buscar S_static[i, :] = x_static[ticker=i]                  → [d_static]
-   e. Buscar r[i] = return normalizado do ticker i em date_{t+1}   → scalar
+### 7.2 Pré-Processamento Recomendado (uma vez, no `__init__`)
 
-3. Retornar S[N,L,d_ts], S_static[N,d_static], r[N], mask[N]
+Para permitir buscas $O(1)$ por ticker/data durante o treinamento:
+
+```python
+# Ordenar x_ts por ticker e data para buscas de janela eficientes
+x_ts = x_ts.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+# Extrair a matriz de features como numpy (alinhada ao index)
+feature_matrix = x_ts[feature_cols].values              # shape: (n_rows, 38)
+dates_array    = x_ts["date"].values                     # shape: (n_rows,)
+tickers_array  = x_ts["ticker"].values                   # shape: (n_rows,)
+
+# Indexar linhas por ticker para lookback rápido
+ticker_groups = x_ts.groupby("ticker").indices            # dict: ticker → array de row indices
+
+# Calendário de datas disponíveis (ordenado)
+all_dates = np.sort(x_ts["date"].unique())
+
+# x_static como dict para lookup O(1)
+static_cols = [c for c in x_static.columns if c != "ticker"]
+static_dict = x_static.set_index("ticker")[static_cols]  # DataFrame indexado por ticker
+d_static    = len(static_cols)                            # 11
+
+# Preços para cálculo do retorno-alvo
+prices = prices.sort_values(["ticker", "date"]).reset_index(drop=True)
+price_lookup = prices.pivot(index="date", columns="ticker", values="close")
 ```
 
-A primeira data treinável não é 2005-01-04, mas ~2006-01 (256 dias úteis depois do início dos dados). O primeiro ano serve apenas para construir o lookback.
+### 7.3 Construção dos Tensores para uma Data $t$ (`__getitem__`)
+
+Cada batch corresponde a **um dia de negociação** $t$. O modelo recebe todos os ativos presentes naquela data.
+
+```python
+L = 256  # tamanho da janela de lookback
+
+def build_sample(date_t):
+    # 1. Universo: tickers presentes em x_ts na data t
+    mask_date = x_ts["date"] == date_t
+    tickers_t = x_ts.loc[mask_date, "ticker"].unique()
+
+    S_list      = []    # lookback windows
+    S_stat_list = []    # static features
+    r_list      = []    # target returns
+    valid_mask  = []    # True se o ticker tem lookback completo + target
+
+    # 2. Data do target: próximo dia útil após t
+    t_idx    = np.searchsorted(all_dates, date_t)
+    if t_idx + 1 >= len(all_dates):
+        return None  # último dia, sem target
+    date_t1  = all_dates[t_idx + 1]
+
+    for ticker in tickers_t:
+        rows_idx = ticker_groups[ticker]                  # row indices deste ticker
+        ticker_dates = dates_array[rows_idx]
+
+        # Posição da data t no histórico deste ticker
+        pos = np.searchsorted(ticker_dates, date_t)
+
+        # 3a. Lookback: precisa de L dias de histórico (incluindo t)
+        if pos + 1 < L:
+            # Histórico insuficiente → mask = False, preencher com zeros
+            S_list.append(np.zeros((L, d_ts), dtype=np.float32))
+            S_stat_list.append(static_dict.loc[ticker].values.astype(np.float32))
+            r_list.append(0.0)
+            valid_mask.append(False)
+            continue
+
+        # Janela de L timesteps: [t-L+1, ..., t]
+        window_rows = rows_idx[pos - L + 1 : pos + 1]
+        S_i = feature_matrix[window_rows]                 # (L, d_ts)
+
+        # 3b. Static
+        S_static_i = static_dict.loc[ticker].values       # (d_static,)
+
+        # 3c. Target: log-return bruto de t → t+1 (NÃO normalizado)
+        p_t  = price_lookup.loc[date_t,  ticker] if date_t  in price_lookup.index else np.nan
+        p_t1 = price_lookup.loc[date_t1, ticker] if date_t1 in price_lookup.index else np.nan
+        r_target = np.log(p_t1 / p_t) if (not np.isnan(p_t) and not np.isnan(p_t1) and p_t > 0) else np.nan
+
+        has_target = not np.isnan(r_target)
+
+        S_list.append(S_i.astype(np.float32))
+        S_stat_list.append(S_static_i.astype(np.float32))
+        r_list.append(r_target / stats["returns_std"] if has_target else 0.0)
+        valid_mask.append(has_target)
+
+    # 4. Empilhar em tensores
+    S        = torch.tensor(np.stack(S_list))              # (N, L, d_ts)
+    S_static = torch.tensor(np.stack(S_stat_list))         # (N, d_static)
+    r        = torch.tensor(r_list, dtype=torch.float32)   # (N,)
+    mask     = torch.tensor(valid_mask, dtype=torch.bool)  # (N,)
+
+    return S, S_static, r, mask
+```
+
+### 7.4 Contratos e Garantias dos Dados
+
+O pipeline garante os seguintes invariantes nos arquivos finais:
+
+| Propriedade | Garantia |
+|---|---|
+| NaN / Inf em `x_ts` | Zero — todos eliminados (NaN residuais → 0.0) |
+| NaN / Inf em `x_static` | Zero |
+| Consistência de tickers | Todo ticker em `x_ts` existe em `x_static` |
+| Alinhamento temporal | Datas em `x_ts` ⊆ datas em `prices` |
+| Ordem das features | Idêntica a `stats["feature_order"]` |
+| Normalização | Todas as features em `x_ts` já estão normalizadas pelos stats do treino |
+| Tipo dos dados | Todas as features são `float64` |
+
+### 7.5 Resumo dos Shapes
+
+| Tensor | Shape | Origem |
+|---|---|---|
+| `S` | `[N_t, 256, 38]` | `x_ts.parquet`, coluna `feature_order` |
+| `S_static` | `[N_t, 11]` | `x_static.parquet`, colunas de setor |
+| `r` | `[N_t]` | `prices.parquet`, log-return $t \to t{+}1$ normalizado por $\sigma_{train}$ |
+| `mask` | `[N_t]` | `True` se lookback ≥ 256 dias e target disponível |
+
+Onde $N_t$ varia por data (~200–400 ativos em datas típicas).
+
+### 7.6 Split Temporal para Treinamento
+
+O dataset loader deve filtrar as datas disponíveis segundo o split:
+
+```python
+train_dates = all_dates[all_dates <= np.datetime64("2018-12-31")]
+val_dates   = all_dates[(all_dates > np.datetime64("2018-12-31")) & (all_dates <= np.datetime64("2022-12-31"))]
+test_dates  = all_dates[all_dates > np.datetime64("2022-12-31")]
+```
+
+A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias úteis depois do início dos dados). O primeiro ano serve apenas para construir o lookback.
+
+### 7.7 Notas Importantes
+
+1. **Features de índices são idênticas para todos os tickers**: As 29 colunas `*_ret` de Bloomberg repetem o mesmo valor para todos os ativos na mesma data. O modelo não precisa tratá-las de forma diferente — elas entram concatenadas no vetor $S[i, u, :]$.
+
+2. **O retorno em `x_ts` é feature, não target**: A coluna `return` em `x_ts` é o retorno do dia $u$ normalizado — serve como input no lookback. O target $r_{i,t+1}$ deve ser calculado a partir de `prices.parquet` (preços brutos).
+
+3. **Nenhum ticker tem identidade explícita**: O modelo não recebe o nome do ticker. A identidade do ativo é implícita nas suas features temporais e no setor estático. Dois ativos do mesmo setor com trajetórias similares produzirão embeddings similares.
+
+4. **Variabilidade de $N_t$**: O número de ativos varia entre datas. O dataset loader deve suportar batch com $N$ variável (padding + mask, ou collate customizado).
 
 ---
 
@@ -435,11 +582,11 @@ Extraídos de `normalization_stats.json` após a última execução:
 |---|---|
 | Período de treino | 2005-01-04 → 2018-12-31 |
 | $\sigma_{train}$ (retornos) | 0.0545 |
-| $d_{ts}$ | 36 |
+| $d_{ts}$ | 38 |
 | $d_{static}$ | determinado pelo número de setores únicos |
 | Tickers no treino | 841 |
 | Tickers total (todos os períodos) | 956 |
 
-**Feature order em `x_ts`:** `return`, `roa`, `roe`, `margem_bruta`, `divida_bruta_ativo`, `divida_liq_pl`, `pvpa`, seguidos de 29 séries de retornos de índices Bloomberg (sufixo `_ret`).
+**Feature order em `x_ts`:** `return`, `roa`, `roe`, `margem_bruta`, `divida_bruta_ativo`, `divida_liq_pl`, `pvpa`, `ev_ebitda`, `preco_lucro`, seguidos de 29 séries de retornos de índices Bloomberg (sufixo `_ret`).
 
 **Extensibilidade:** Para adicionar uma nova feature fundamental, basta adicionar a entrada em `FUNDAMENTAL_FILES` no `config.py` e reexecutar o pipeline — o `d_ts` é descoberto automaticamente.
