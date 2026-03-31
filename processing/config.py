@@ -26,6 +26,8 @@ FUNDAMENTAL_FILES = {
     "divida_bruta_ativo": ("trimestral/dividabruta_ativo.csv", "divida_bruta_ativo"),
     "divida_liq_pl": ("trimestral/dividaliq_pl.csv", "divida_liq_pl"),
     "pvpa": ("diario/preco_valor_patrimonial.csv", "pvpa"),
+    "ev_ebitda": ("diario/ev_ebitda.csv", "ev_ebitda"),
+    "preco_lucro": ("diario/preco_lucro.csv", "preco_lucro"),
 }
 
 BLOOMBERG_PATH = RAW / "bloomberg_indices_values.xlsx"
