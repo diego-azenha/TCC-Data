@@ -11,6 +11,7 @@ STEPS = [
     "03_clean_bloomberg",
     "04_clean_sectors",
     "05_feature_returns",
+    "05b_feature_composite",
     "06_feature_fundamentals",
     "07_feature_indices",
     "08_assemble_x_ts",

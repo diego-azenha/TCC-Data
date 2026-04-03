@@ -14,6 +14,8 @@ import pandas as pd
 
 from config import CLEANED, FEATURES, FUNDAMENTAL_FILES, PARQUETS, TRAIN_END
 
+COMPOSITE_COLS = ["fcf_divida", "fcf_yield"]
+
 
 def main() -> None:
     print("[08] Assembling x_ts ...")
@@ -33,13 +35,19 @@ def main() -> None:
     # Merge index returns (broadcast: same for all tickers on a given date)
     x_ts = x_ts.merge(index_returns, on="date", how="left")
 
+    # Merge composite indicators
+    fcf_divida = pd.read_parquet(FEATURES / "fcf_divida_ffill.parquet")
+    fcf_yield = pd.read_parquet(FEATURES / "fcf_yield.parquet")
+    x_ts = x_ts.merge(fcf_divida, on=["date", "ticker"], how="left")
+    x_ts = x_ts.merge(fcf_yield, on=["date", "ticker"], how="left")
+
     x_ts = x_ts.sort_values(["date", "ticker"]).reset_index(drop=True)
 
     # --- Identify column groups ---
     idx_ret_cols = [c for c in index_returns.columns if c != "date"]
-    feature_cols = ["return"] + fund_cols + idx_ret_cols
+    feature_cols = ["return"] + fund_cols + COMPOSITE_COLS + idx_ret_cols
 
-    print(f"      Features: {len(feature_cols)} ({1} return + {len(fund_cols)} fund + {len(idx_ret_cols)} indices)")
+    print(f"      Features: {len(feature_cols)} ({1} return + {len(fund_cols)} fund + {len(COMPOSITE_COLS)} composite + {len(idx_ret_cols)} indices)")
 
     # --- Compute train-period stats ---
     train_mask = x_ts["date"] <= pd.Timestamp(TRAIN_END)
@@ -62,6 +70,18 @@ def main() -> None:
         mu = float(train[col].mean())
         sigma = float(train[col].std())
         stats["fundamental_stats"][col] = {"mean": mu, "std": sigma}
+        if sigma > 0:
+            x_ts[col] = (x_ts[col] - mu) / sigma
+        else:
+            x_ts[col] = 0.0
+        print(f"      {col}: μ={mu:.4f}, σ={sigma:.4f}")
+
+    # Composite indicators: z-score with global train stats
+    stats["composite_stats"] = {}
+    for col in COMPOSITE_COLS:
+        mu = float(train[col].mean())
+        sigma = float(train[col].std())
+        stats["composite_stats"][col] = {"mean": mu, "std": sigma}
         if sigma > 0:
             x_ts[col] = (x_ts[col] - mu) / sigma
         else:

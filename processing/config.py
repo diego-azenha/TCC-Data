@@ -28,7 +28,13 @@ FUNDAMENTAL_FILES = {
     "pvpa": ("diario/preco_valor_patrimonial.csv", "pvpa"),
     "ev_ebitda": ("diario/ev_ebitda.csv", "ev_ebitda"),
     "preco_lucro": ("diario/preco_lucro.csv", "preco_lucro"),
+    "volume": ("diario/volume.csv", "volume"),
 }
 
 BLOOMBERG_PATH = RAW / "bloomberg_indices_values.xlsx"
 SECTOR_PATH = RAW / "setor_ibovespa.xlsx"
+
+# Composite indicator raw sources
+FCF_PATH = RAW_ECO / "trimestral/fluxodecaixalivre.csv"
+DIVIDA_TOTAL_PATH = RAW_ECO / "trimestral/dividatotalbruta.csv"
+MKTCAP_PATH = RAW_ECO / "diario/valordemercado.csv"

@@ -27,14 +27,18 @@ Todas as features entram concatenadas na dimensão $d_{ts}$. O modelo não disti
 
 Todos os arquivos brutos estão em `raw/`.
 
-### 1.1 Economatica — Preços (`raw/economatica/diario/`)
+### 1.1 Economatica — Preços e Dados Diários (`raw/economatica/diario/`)
 
 | Arquivo | Métrica | Frequência | Período |
 |---|---|---|---|
 | `fechamento.csv` | Fechamento ajust p/ proventos | Diária | 2004-12 → 2026-03 |
 | `preco_valor_patrimonial.csv` | P/VPA (Preço / Valor Patrimonial) | Diária | 2004-12 → 2026-03 |
+| `ev_ebitda.csv` | EV/EBITDA | Diária | 2004-12 → 2026-03 |
+| `preco_lucro.csv` | P/L (Preço / Lucro) | Diária | 2004-12 → 2026-03 |
+| `volume.csv` | Volume financeiro negociado | Diária | 2004-12 → 2026-03 |
+| `valordemercado.csv` | Valor de Mercado (Market Cap) | Diária | 2004-12 → 2026-03 |
 
-Formato wide Economatica: `Ativo | Data | ~1.419 colunas de tickers`. Missing codificado como `"-"`. P/VPA tem ~28.7% de células não-nulas (cobertura diária para tickers ativos).
+Formato wide Economatica: `Ativo | Data | ~1.419 colunas de tickers`. Missing codificado como `"-"`. `valordemercado.csv` é usado exclusivamente no script de indicadores compostos (não entra em `FUNDAMENTAL_FILES`).
 
 ### 1.2 Economatica — Fundamentais Trimestrais (`raw/economatica/trimestral/`)
 
@@ -47,6 +51,15 @@ Formato wide Economatica: `Ativo | Data | ~1.419 colunas de tickers`. Missing co
 | `dividaliq_pl.csv` | Dívida Líquida / PL | Alavancagem | 2004-12 → ~2025 |
 
 Mesmo formato wide, em grade diária. Valores efetivos existem apenas em ~139–244 datas de fim de trimestre — o restante da grade é todo `"-"`. ROA, ROE e margem bruta já vêm como trailing-twelve-months (TTM) na fonte; as métricas de dívida são ratios de balanço point-in-time.
+
+### 1.2b Economatica — Fontes dos Indicadores Compostos (`raw/economatica/trimestral/`)
+
+| Arquivo | Métrica | Período |
+|---|---|---|
+| `fluxodecaixalivre.csv` | FCL (Free Cash Flow, TTM, R$ mil) | 2004-12 → ~2025 |
+| `dividatotalbruta.csv` | Dívida Total Bruta (R$ mil) | 2004-12 → ~2025 |
+
+Usados exclusivamente no script `05b_feature_composite.py` para construir FCF Yield e FCF/Dívida. Não passam pelo fluxo de `FUNDAMENTAL_FILES`.
 
 ### 1.3 Bloomberg — Índices de Mercado (`raw/bloomberg_indices_values.xlsx`)
 
@@ -70,8 +83,6 @@ Arquivo com ~1.420 tickers da Bovespa (ativos + cancelados), contendo classifica
 | Dado | Situação |
 |---|---|
 | `raw/composicao_ibovespa.xlsx` | Presente, **não usado** — universo definido implicitamente por preços |
-| Volume diário por ativo | **Não disponível**. `log(volume)` seria feature temporal stock-specific |
-| P/E, EV/EBITDA, FCF Yield | **Não disponível**. Features de valuation adicionais |
 
 ---
 
@@ -95,7 +106,7 @@ O pipeline se divide em 4 camadas, cada uma produzindo artefatos persistentes em
 
 | Arquivo | Papel |
 |---|---|
-| `processing/config.py` | Constantes globais: caminhos (`ROOT`, `RAW`, `CLEANED`, `FEATURES`, `PARQUETS`), split temporal (`TRAIN_END = "2018-12-31"`, `VAL_END = "2022-12-31"`, `MIN_DATE = "2005-01-03"`), mapa dos 6 CSVs de fundamentais (`FUNDAMENTAL_FILES` — 5 trimestrais + P/VPA diário) |
+| `processing/config.py` | Constantes globais: caminhos (`ROOT`, `RAW`, `CLEANED`, `FEATURES`, `PARQUETS`), split temporal (`TRAIN_END = "2018-12-31"`, `VAL_END = "2022-12-31"`, `MIN_DATE = "2005-01-03"`), mapa dos 9 CSVs de fundamentais (`FUNDAMENTAL_FILES` — 5 trimestrais + 4 diários: pvpa, ev_ebitda, preco_lucro, volume), e constantes de caminho para os 3 arquivos brutos dos indicadores compostos (`FCF_PATH`, `DIVIDA_TOTAL_PATH`, `MKTCAP_PATH`) |
 | `processing/io_utils.py` | Duas funções de leitura reutilizáveis: `read_economatica_wide()` para CSVs Economatica (wide → long, tratamento de `"-"` e duplicatas de coluna) e `read_bloomberg_indices()` para o Excel Bloomberg (5 sheets → DataFrame wide consolidado, deduplicação de colunas como BCOMINTR) |
 | `processing/run_all.py` | Orquestrador sequencial: importa e executa `main()` de cada script 01–10, com timing por etapa |
 
@@ -113,15 +124,15 @@ Este parquet é a **master key do universo**: qualquer dado de fundamentais ou f
 
 **Números da execução:** 956 tickers únicos ao longo de todo o período.
 
-### 3.2 `02_clean_fundamentals.py` → `cleaned/{metric}.parquet` (×6)
+### 3.2 `02_clean_fundamentals.py` → `cleaned/{metric}.parquet` (×9)
 
 Para cada CSV registrado em `FUNDAMENTAL_FILES`, lê via `read_economatica_wide()`, filtra tickers pelo universo de `prices.parquet`, filtra datas ≥ 2005-01-01, e aplica **winsorização nos percentis 1% e 99%** para conter outliers extremos.
 
-**Outputs:** `cleaned/roa.parquet`, `cleaned/roe.parquet`, `cleaned/margem_bruta.parquet`, `cleaned/divida_bruta_ativo.parquet`, `cleaned/divida_liq_pl.parquet`, `cleaned/pvpa.parquet`
+**Outputs:** `cleaned/roa.parquet`, `cleaned/roe.parquet`, `cleaned/margem_bruta.parquet`, `cleaned/divida_bruta_ativo.parquet`, `cleaned/divida_liq_pl.parquet`, `cleaned/pvpa.parquet`, `cleaned/ev_ebitda.parquet`, `cleaned/preco_lucro.parquet`, `cleaned/volume.parquet`
 
 **Schema (cada):** `date: datetime64 | ticker: str | {metric}: float64`
 
-Para os 5 trimestrais, cada arquivo contém apenas datas de fim de trimestre com valores efetivos. Para P/VPA (diário), o arquivo contém ~2.25M rows com dados em cada dia de negociação onde o ativo tem valor.
+Para os 5 trimestrais, cada arquivo contém apenas datas de fim de trimestre com valores efetivos. Para os 4 diários (pvpa, ev_ebitda, preco_lucro, volume), o arquivo contém dados em cada dia de negociação onde o ativo tem valor.
 
 ### 3.3 `03_clean_bloomberg.py` → `cleaned/market_indices.parquet`
 
@@ -145,6 +156,28 @@ Calcula log-returns por ticker: $r_{i,t} = \ln(P_{i,t} / P_{i,t-1})$. Substitui 
 
 **Schema:** `date: datetime64 | ticker: str | return: float64`
 
+### 4.1b `05b_feature_composite.py` → `features/fcf_divida_ffill.parquet` + `features/fcf_yield.parquet`
+
+Constrói dois indicadores compostos a partir de fontes brutas separadas (não passam por `FUNDAMENTAL_FILES`):
+
+**FCF / Dívida Total:**
+- Merge de `fluxodecaixalivre.csv` e `dividatotalbruta.csv` em `(date, ticker)` nas datas de reporte trimestral
+- Dívida com `abs(divida) < 1.0` (R$1k) mascarada como NaN antes da divisão
+- Inputs e ratio winsorizados em p1/p99
+- Forward-fill para grade diária; resultado em `features/fcf_divida_ffill.parquet`
+- **Fill rate:** ~67% de cobertura após ffill
+
+**FCF Yield = FCF / Valor de Mercado:**
+- FCL trimestral forward-filled para grade diária
+- Market Cap (`valordemercado.csv`) diário; valores ≤ 0 mascarados como NaN
+- Inputs e ratio winsorizados em p1/p99
+- Resultado em `features/fcf_yield.parquet`
+- **Fill rate:** ~70% de cobertura
+
+**Regra anti-lookahead:** apenas `ffill()`, nunca `bfill()`.
+
+**Schema (cada):** `date: datetime64 | ticker: str | {fcf_divida ou fcf_yield}: float64`
+
 ### 4.2 `06_feature_fundamentals.py` → `features/fundamentals_ffill.parquet`
 
 Para cada uma das 6 métricas em `FUNDAMENTAL_FILES`, faz merge com o calendário diário completo de `prices.parquet`, e aplica `ffill()` por ticker. **Sem `bfill()`** — evita look-ahead bias.
@@ -164,7 +197,7 @@ Grade diária:
   2005-07-01 → 0.09  (forward-fill do Q2)
 ```
 
-**Schema:** `date: datetime64 | ticker: str | roa | roe | margem_bruta | divida_bruta_ativo | divida_liq_pl | pvpa: float64`
+**Schema:** `date: datetime64 | ticker: str | roa | roe | margem_bruta | divida_bruta_ativo | divida_liq_pl | pvpa | ev_ebitda | preco_lucro | volume: float64`
 
 ### 4.3 `07_feature_indices.py` → `features/index_returns.parquet`
 
@@ -195,12 +228,15 @@ Definido em `config.py`:
 **Merge:**
 1. `features/returns.parquet` define o universo `(date, ticker)`.
 2. Left join com `features/fundamentals_ffill.parquet` em `(date, ticker)`.
-3. Left join com `features/index_returns.parquet` em `date` (broadcast: mesmo valor para todos os tickers na mesma data).
+3. Left join com `features/fcf_divida_ffill.parquet` em `(date, ticker)`.
+4. Left join com `features/fcf_yield.parquet` em `(date, ticker)`.
+5. Left join com `features/index_returns.parquet` em `date` (broadcast: mesmo valor para todos os tickers na mesma data).
 
 **Normalização (usando apenas dados com `date ≤ TRAIN_END`):**
 
 - **Retornos:** Divisão por $\sigma_{train}$ apenas, sem subtrair a média. $\tilde{r}_{i,t} = r_{i,t} / \sigma_{train}$. O $\sigma_{train}$ obtido = **0.0545**.
-- **Fundamentais:** Z-score global. $\tilde{f}_{i,t} = (f_{i,t} - \mu_{f,train}) / \sigma_{f,train}$. Uma média e desvio por feature, pooled across tickers and dates no período de treino.
+- **Fundamentais (9 séries):** Z-score global. $\tilde{f}_{i,t} = (f_{i,t} - \mu_{f,train}) / \sigma_{f,train}$. Uma média e desvio por feature, pooled across tickers and dates no período de treino.
+- **Indicadores compostos (2 séries):** Z-score global com stats do treino, armazenados separadamente em `stats["composite_stats"]`.
 - **Índices:** Z-score por série. $\tilde{r}^{idx}_t = (r^{idx}_t - \mu^{idx}_{train}) / \sigma^{idx}_{train}$.
 - **Divisão por zero:** Se $\sigma_{f,train} = 0$ para alguma feature, o valor é fixado em 0.0.
 
@@ -218,12 +254,17 @@ margem_bruta:       float64   ← z-score global (treino)
 divida_bruta_ativo: float64   ← z-score global (treino)
 divida_liq_pl:      float64   ← z-score global (treino)
 pvpa:               float64   ← z-score global (treino)
+ev_ebitda:          float64   ← z-score global (treino)
+preco_lucro:        float64   ← z-score global (treino)
+volume:             float64   ← z-score global (treino)
+fcf_divida:         float64   ← z-score global (treino) [composite]
+fcf_yield:          float64   ← z-score global (treino) [composite]
 VIX Index_ret:      float64   ← z-score por série (treino)
 MOVE Index_ret:     float64
 ... (demais 27 séries de índices)
 ```
 
-**Resultado:** $d_{ts} = 38$ (1 retorno + 8 fundamentais + 29 índices). 956 tickers no total, 841 no período de treino.
+**Resultado:** $d_{ts} = 41$ (1 retorno + 9 fundamentais + 2 compostos + 29 índices). 975 tickers no total, 841 no período de treino.
 
 O arquivo `parquets/prices.parquet` é uma cópia de `cleaned/prices.parquet` para consumo direto pelo dataset loader (cálculo do retorno-alvo $r_{i,t+1}$).
 
@@ -258,23 +299,26 @@ O script retorna exit code 1 se houver falhas críticas.
 
 ```
 TCC Data Cleaning/
-├── _claude/
-│   └── data_pipeline_plan.md          ← este documento
-│
 ├── raw/                                ← Camada 0: dados brutos
 │   ├── economatica/
 │   │   ├── diario/
 │   │   │   ├── fechamento.csv
-│   │   │   └── preco_valor_patrimonial.csv
+│   │   │   ├── preco_valor_patrimonial.csv
+│   │   │   ├── ev_ebitda.csv
+│   │   │   ├── preco_lucro.csv
+│   │   │   ├── volume.csv
+│   │   │   └── valordemercado.csv              (composite only)
 │   │   └── trimestral/
 │   │       ├── ROA.csv
 │   │       ├── ROE.csv
 │   │       ├── margembruta.csv
 │   │       ├── dividabruta_ativo.csv
-│   │       └── dividaliq_pl.csv
+│   │       ├── dividaliq_pl.csv
+│   │       ├── fluxodecaixalivre.csv           (composite only)
+│   │       └── dividatotalbruta.csv            (composite only)
 │   ├── bloomberg_indices_values.xlsx
 │   ├── setor_ibovespa.xlsx
-│   └── composicao_ibovespa.xlsx        (não usado)
+│   └── composicao_ibovespa.xlsx            (não usado)
 │
 ├── cleaned/                            ← Camada 1: dados limpos (long format)
 │   ├── prices.parquet                  (master key do universo)
@@ -284,16 +328,21 @@ TCC Data Cleaning/
 │   ├── divida_bruta_ativo.parquet
 │   ├── divida_liq_pl.parquet
 │   ├── pvpa.parquet
+│   ├── ev_ebitda.parquet
+│   ├── preco_lucro.parquet
+│   ├── volume.parquet
 │   ├── market_indices.parquet
 │   └── sectors.parquet
 │
 ├── features/                           ← Camada 2: features engenheiradas
 │   ├── returns.parquet
 │   ├── fundamentals_ffill.parquet
+│   ├── fcf_divida_ffill.parquet
+│   ├── fcf_yield.parquet
 │   └── index_returns.parquet
 │
 ├── parquets/                           ← Camada 3: model-ready
-│   ├── x_ts.parquet                    (date × ticker × 36 features normalizadas)
+│   ├── x_ts.parquet                    (date × ticker × 41 features normalizadas)
 │   ├── x_static.parquet                (ticker × one-hot setores)
 │   ├── prices.parquet                  (preços brutos para retorno-alvo)
 │   └── normalization_stats.json        (estatísticas de normalização)
@@ -307,6 +356,7 @@ TCC Data Cleaning/
     ├── 03_clean_bloomberg.py
     ├── 04_clean_sectors.py
     ├── 05_feature_returns.py
+    ├── 05b_feature_composite.py
     ├── 06_feature_fundamentals.py
     ├── 07_feature_indices.py
     ├── 08_assemble_x_ts.py
@@ -329,15 +379,15 @@ import json
 import torch
 
 # ── Carregar os 4 artefatos ──
-x_ts     = pd.read_parquet("parquets/x_ts.parquet")      # (1.7M rows × 40 cols)
-x_static = pd.read_parquet("parquets/x_static.parquet")  # (956 rows × 12 cols)
+x_ts     = pd.read_parquet("parquets/x_ts.parquet")      # (1.7M rows × 43 cols)
+x_static = pd.read_parquet("parquets/x_static.parquet")  # (975 rows × 12 cols)
 prices   = pd.read_parquet("parquets/prices.parquet")     # (1.7M rows × 3 cols)
 
 with open("parquets/normalization_stats.json") as f:
     stats = json.load(f)
 
-feature_cols = stats["feature_order"]   # lista ordenada de 38 features
-d_ts         = stats["d_ts"]            # 38
+feature_cols = stats["feature_order"]   # lista ordenada de 41 features
+d_ts         = stats["d_ts"]            # 41
 ```
 
 A coluna `return` dentro de `x_ts` já é o retorno normalizado $r_{i,t}/\sigma_{train}$ — ela é usada como **feature de input** no lookback, não como target. O target $r_{i,t+1}$ deve ser calculado a partir de `prices.parquet`.
@@ -351,7 +401,7 @@ Para permitir buscas $O(1)$ por ticker/data durante o treinamento:
 x_ts = x_ts.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 # Extrair a matriz de features como numpy (alinhada ao index)
-feature_matrix = x_ts[feature_cols].values              # shape: (n_rows, 38)
+feature_matrix = x_ts[feature_cols].values              # shape: (n_rows, 41)
 dates_array    = x_ts["date"].values                     # shape: (n_rows,)
 tickers_array  = x_ts["ticker"].values                   # shape: (n_rows,)
 
@@ -456,7 +506,7 @@ O pipeline garante os seguintes invariantes nos arquivos finais:
 
 | Tensor | Shape | Origem |
 |---|---|---|
-| `S` | `[N_t, 256, 38]` | `x_ts.parquet`, coluna `feature_order` |
+| `S` | `[N_t, 256, 41]` | `x_ts.parquet`, coluna `feature_order` |
 | `S_static` | `[N_t, 11]` | `x_static.parquet`, colunas de setor |
 | `r` | `[N_t]` | `prices.parquet`, log-return $t \to t{+}1$ normalizado por $\sigma_{train}$ |
 | `mask` | `[N_t]` | `True` se lookback ≥ 256 dias e target disponível |
@@ -500,6 +550,8 @@ A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias ú
 | Fundamental sem valor (pré-primeiro reporte) | NaN após ffill → preenchido com 0.0 | `06` + `08` |
 | Gap entre reportes trimestrais | Forward-fill (sem bfill) | `06_feature_fundamentals.py` |
 | NaN residuais em x_ts | Preenchidos com 0.0 (≈ média normalizada) | `08_assemble_x_ts.py` |
+| FCF/Dívida com `abs(dívida) < 1.0` | Mascarado como NaN antes da divisão | `05b_feature_composite.py` |
+| FCF Yield com market cap ≤ 0 | Mascarado como NaN antes da divisão | `05b_feature_composite.py` |
 | Ticker com < 256 dias de histórico | Excluído via mask no dataset loader | Runtime |
 
 ---
@@ -526,8 +578,6 @@ A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias ú
 
 ### 10.1 Features Ausentes
 
-- **Volume diário por ativo:** Principal feature temporal stock-specific ausente. O paper original usa `log(volume)`. Sem volume, o modelo não tem informação sobre liquidez ou intensidade de negociação.
-- **Features de valuation adicionais (P/E, EV/EBITDA, FCF Yield):** P/VPA já está incluído, mas outros múltiplos de valuation ampliariam a dimensão stock-specific temporal.
 - **Nível do VIX como feature separada:** Apenas a variação do VIX entra. O nível absoluto carrega informação de regime de mercado (alto VIX = stress) que poderia complementar a variação.
 
 ### 10.2 Normalização
@@ -557,14 +607,12 @@ A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias ú
 ### Curto Prazo (sem novos dados)
 
 1. **Incluir nível do VIX como feature adicional:** Concatenar a série de níveis do VIX (já limpa em `market_indices.parquet`) como coluna extra em `x_ts`, normalizada por z-score.
-3. **Filtro de liquidez:** Usar o próprio `prices.parquet` para excluir tickers com menos de $k$ observações de preço por mês, ou com gaps frequentes. Criaria um universo mais realista.
-4. **Normalização robusta dos fundamentais:** Substituir z-score por winsorized z-score, ou usar medianas ao invés de médias para computar as estatísticas de treino. Alternativa: rank-transform para features de cauda pesada como Dívida Líq./PL.
+2. **Filtro de liquidez:** Usar o próprio `prices.parquet` para excluir tickers com menos de $k$ observações de preço por mês, ou com gaps frequentes. Criaria um universo mais realista.
+3. **Normalização robusta dos fundamentais:** Substituir z-score por winsorized z-score, ou usar medianas ao invés de médias para computar as estatísticas de treino. Alternativa: rank-transform para features de cauda pesada como Dívida Líq./PL.
 
 ### Médio Prazo (novos dados necessários)
 
-5. **Volume diário:** Obter via Economatica ou outra fonte. Processar como `log(volume + 1)`, normalizar por z-score do treino, merge em x_ts. Impacto potencialmente alto — o paper destaca volume como feature relevante.
-6. **Features de valuation:** P/E, EV/EBITDA, FCF Yield. Expandiriam significativamente a dimensão stock-specific.
-7. **Data de publicação real dos fundamentais:** Se disponível, usar a data de divulgação (ao invés de fim de trimestre) para o ffill, eliminando o look-ahead bias leve.
+4. **Data de publicação real dos fundamentais:** Se disponível, usar a data de divulgação (ao invés de fim de trimestre) para o ffill, eliminando o look-ahead bias leve.
 
 ### Longo Prazo (estrutural)
 
@@ -582,11 +630,18 @@ Extraídos de `normalization_stats.json` após a última execução:
 |---|---|
 | Período de treino | 2005-01-04 → 2018-12-31 |
 | $\sigma_{train}$ (retornos) | 0.0545 |
-| $d_{ts}$ | 38 |
-| $d_{static}$ | determinado pelo número de setores únicos |
+| $d_{ts}$ | 41 |
+| $d_{static}$ | 11 |
 | Tickers no treino | 841 |
-| Tickers total (todos os períodos) | 956 |
+| Tickers total (todos os períodos) | 975 |
 
-**Feature order em `x_ts`:** `return`, `roa`, `roe`, `margem_bruta`, `divida_bruta_ativo`, `divida_liq_pl`, `pvpa`, `ev_ebitda`, `preco_lucro`, seguidos de 29 séries de retornos de índices Bloomberg (sufixo `_ret`).
+**Feature order em `x_ts`:** `return`, `roa`, `roe`, `margem_bruta`, `divida_bruta_ativo`, `divida_liq_pl`, `pvpa`, `ev_ebitda`, `preco_lucro`, `volume`, `fcf_divida`, `fcf_yield`, seguidos de 29 séries de retornos de índices Bloomberg (sufixo `_ret`).
+
+**Estatísticas dos indicadores compostos (treino):**
+
+| Feature | μ | σ |
+|---|---|---|
+| `fcf_divida` | 0.1932 | 2.1061 |
+| `fcf_yield` | 0.0138 | 0.4858 |
 
 **Extensibilidade:** Para adicionar uma nova feature fundamental, basta adicionar a entrada em `FUNDAMENTAL_FILES` no `config.py` e reexecutar o pipeline — o `d_ts` é descoberto automaticamente.

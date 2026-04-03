@@ -13,6 +13,9 @@
     "pvpa",
     "ev_ebitda",
     "preco_lucro",
+    "volume",
+    "fcf_divida",
+    "fcf_yield",
     "VIX Index_ret",
     "MOVE Index_ret",
     "BRAZIL CDS USD SR 5Y D14 Corp_ret",
@@ -76,6 +79,20 @@
     "preco_lucro": {
       "mean": 11.500709138638452,
       "std": 42.194266559630364
+    },
+    "volume": {
+      "mean": 16635.590960397716,
+      "std": 52967.14735063124
+    }
+  },
+  "composite_stats": {
+    "fcf_divida": {
+      "mean": 0.1932288095417345,
+      "std": 2.1060567854557637
+    },
+    "fcf_yield": {
+      "mean": 0.013821769748459275,
+      "std": 0.485792739302871
     }
   },
   "index_stats": {
@@ -196,7 +213,7 @@
       "std": 0.012029129460616713
     }
   },
-  "d_ts": 38,
+  "d_ts": 41,
   "n_tickers_total": 956,
   "n_tickers_train": 841
 }
