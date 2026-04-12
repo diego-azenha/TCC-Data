@@ -32,8 +32,8 @@ def main() -> None:
             fund, on=["date", "ticker"], how="left"
         )
 
-        # Forward-fill per ticker
-        merged[col_name] = merged.groupby("ticker")[col_name].ffill()
+        # Forward-fill per ticker (limited to 400 days ~= 1.6 years to avoid staleness)
+        merged[col_name] = merged.groupby("ticker")[col_name].ffill(limit=400)
 
         result[col_name] = merged[col_name].values
         pct_fill = 100 * result[col_name].notna().mean()

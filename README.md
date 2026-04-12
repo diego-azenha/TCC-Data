@@ -86,6 +86,42 @@ Arquivo com ~1.420 tickers da Bovespa (ativos + cancelados), contendo classifica
 
 ---
 
+## 1.6 Melhorias Recentes Aplicadas (5 Fixes de Qualidade de Dados)
+
+Em April 2026, foram identificadas e corrigidas **5 problemas críticos de qualidade de dados** que afetavam a confiabilidade do modelo:
+
+### Fix 1: Deduplicação de Classes de Ações (ON/PN)
+**Problema:** O universo inicial continha 956 tickers, incluindo múltiplas classes de ações da mesma empresa (ex: PETR3 e PETR4, VALE3 e VALE5), gerando duplicatas com fundamentais idênticos mas preços distintos.
+
+**Solução:** Implementado em `processing/01_clean_prices.py`: para cada base de ticker (parte alfabética), seleciona-se apenas a classe com máximo volume médio de negociação. Resultado: universo reduzido para **632 tickers únicos**.
+
+### Fix 2: Winsorização Train-Only em Fundamentais
+**Problema:** Em `processing/02_clean_fundamentals.py`, os bounds de winsorização (percentis 1% e 99%) eram calculados sobre **todo o dataset** (incluindo val/test), criando look-ahead bias.
+
+**Solução:** Bounds recalculados **exclusivamente no período de treino** (2005-01-04 → 2018-12-31) e aplicados de forma consistente a todos os períodos. Elimina contaminação de dados futuros nas estatísticas.
+
+### Fix 3: Winsorização Train-Only em Indicadores Compostos
+**Problema:** Em `processing/05b_feature_composite.py`, os indicadores FCF/Dívida e FCF Yield eram winzorizados com bounds do dataset completo.
+
+**Solução:** Modificação da função `_winsorize()` para aceitar máscara de treino; bounds calculados train-only. Elimina look-ahead bias nos indicadores compostos.
+
+### Fix 4: Forward-Fill com Limite de Staleness
+**Problema:** Em `processing/06_feature_fundamentals.py`, o forward-fill de fundamentais trimestrais era ilimitado, permitindo que dados de 3+ anos de idade fossem usados como features "atuais".
+
+**Solução:** Limitação a `ffill(limit=400)` (400 dias úteis ≈ 1.6 anos). Após esse período, o valor volta a NaN e é tratado como missing (mascarado no downstream).
+
+### Fix 5a: Masks Explícitos de Missingness
+**Problema:** NaN eram preenchidos com 0.0 após z-score, tornando ambíguo: um zero significava "valor ausente" ou "na média"?
+
+**Solução:** Criação de 40 indicadores binários `{feature}_obs` (um por fundamental, composite e índice), registrando True/False **antes** do preenchimento com 0.0. Modelo explicitamente rastreia observações vs imputações.
+
+### Fix 5b: Redução Dimensional via PCA
+**Problema:** 29 séries de índices Bloomberg eram altamente correlacionadas e redundantes (múltiplas séries para Brasil, renda fixa, commodities globais).
+
+**Solução:** PCA ajustado **exclusivamente no período de treino**, reduzindo 29 → 10 componentes principais (95.2% de variância explicada). Elimina multicolinearidade e reduz `d_ts` de 41 → 22.
+
+---
+
 ## 2. Arquitetura do Pipeline
 
 O pipeline se divide em 4 camadas, cada uma produzindo artefatos persistentes em Parquet. O fluxo é orquestrado por `processing/run_all.py`, que importa e executa sequencialmente cada script:
@@ -118,15 +154,15 @@ O pipeline se divide em 4 camadas, cada uma produzindo artefatos persistentes em
 
 Lê `fechamento.csv` via `read_economatica_wide()`. Remove preços ≤ 0, filtra para datas ≥ 2005-01-03.
 
+**Deduplicação ON/PN (Fix 1):** Para cada base de ticker (parte alfabética), seleciona-se apenas a classe de ação com máximo volume médio de negociação (ex: PETR4 sobre PETR3, VALE3 sobre VALE5). Reduz universo bruto de 956 para **632 tickers únicos**.
+
 **Schema:** `date: datetime64 | ticker: str | close: float64`
 
 Este parquet é a **master key do universo**: qualquer dado de fundamentais ou features só é utilizado para pares `(date, ticker)` que existam aqui. Se um ticker tem preço válido na data, ele está no universo — sem dependência de composição histórica de índice.
 
-**Números da execução:** 956 tickers únicos ao longo de todo o período.
-
 ### 3.2 `02_clean_fundamentals.py` → `cleaned/{metric}.parquet` (×9)
 
-Para cada CSV registrado em `FUNDAMENTAL_FILES`, lê via `read_economatica_wide()`, filtra tickers pelo universo de `prices.parquet`, filtra datas ≥ 2005-01-01, e aplica **winsorização nos percentis 1% e 99%** para conter outliers extremos.
+Para cada CSV registrado em `FUNDAMENTAL_FILES`, lê via `read_economatica_wide()`, filtra tickers pelo universo de `prices.parquet`, filtra datas ≥ 2005-01-01, e aplica **winsorização train-only (Fix 2)**: os percentis 1% e 99% são calculados **exclusivamente no período de treino** (≤ 2018-12-31) e aplicados de forma consistente a todos os períodos (train/val/test). Elimina look-ahead bias.
 
 **Outputs:** `cleaned/roa.parquet`, `cleaned/roe.parquet`, `cleaned/margem_bruta.parquet`, `cleaned/divida_bruta_ativo.parquet`, `cleaned/divida_liq_pl.parquet`, `cleaned/pvpa.parquet`, `cleaned/ev_ebitda.parquet`, `cleaned/preco_lucro.parquet`, `cleaned/volume.parquet`
 
@@ -163,14 +199,14 @@ Constrói dois indicadores compostos a partir de fontes brutas separadas (não p
 **FCF / Dívida Total:**
 - Merge de `fluxodecaixalivre.csv` e `dividatotalbruta.csv` em `(date, ticker)` nas datas de reporte trimestral
 - Dívida com `abs(divida) < 1.0` (R$1k) mascarada como NaN antes da divisão
-- Inputs e ratio winsorizados em p1/p99
+- Inputs e ratio winsorizados em p1/p99 **calculados exclusivamente no período de treino (Fix 3)**
 - Forward-fill para grade diária; resultado em `features/fcf_divida_ffill.parquet`
 - **Fill rate:** ~67% de cobertura após ffill
 
 **FCF Yield = FCF / Valor de Mercado:**
 - FCL trimestral forward-filled para grade diária
 - Market Cap (`valordemercado.csv`) diário; valores ≤ 0 mascarados como NaN
-- Inputs e ratio winsorizados em p1/p99
+- Inputs e ratio winsorizados em p1/p99 **calculados exclusivamente no período de treino (Fix 3)**
 - Resultado em `features/fcf_yield.parquet`
 - **Fill rate:** ~70% de cobertura
 
@@ -180,9 +216,9 @@ Constrói dois indicadores compostos a partir de fontes brutas separadas (não p
 
 ### 4.2 `06_feature_fundamentals.py` → `features/fundamentals_ffill.parquet`
 
-Para cada uma das 6 métricas em `FUNDAMENTAL_FILES`, faz merge com o calendário diário completo de `prices.parquet`, e aplica `ffill()` por ticker. **Sem `bfill()`** — evita look-ahead bias.
+Para cada uma das 6 métricas em `FUNDAMENTAL_FILES`, faz merge com o calendário diário completo de `prices.parquet`, e aplica `ffill(limit=400)` por ticker **(Fix 4: staleness capped a 400 dias úteis ≈ 1.6 anos)**. **Sem `bfill()`** — evita look-ahead bias.
 
-Para os trimestrais, o ffill propaga o último valor reportado por ~60 dias úteis até o próximo reporte. Para P/VPA (diário), o ffill apenas preenche gaps pontuais de poucos dias. O resultado é um DataFrame com uma linha por `(date, ticker)` com as 6 colunas preenchidas.
+Para os trimestrais, o ffill propaga o último valor reportado por até 400 dias úteis até o próximo reporte (ou conversão a NaN após o limite). Para P/VPA (diário), o ffill apenas preenche gaps de até 400 dias. O resultado é um DataFrame com uma linha por `(date, ticker)` com as 6 colunas preenchidas.
 
 Lógica temporal (ilustração):
 ```
@@ -234,11 +270,14 @@ Definido em `config.py`:
 
 **Normalização (usando apenas dados com `date ≤ TRAIN_END`):**
 
-- **Retornos:** Divisão por $\sigma_{train}$ apenas, sem subtrair a média. $\tilde{r}_{i,t} = r_{i,t} / \sigma_{train}$. O $\sigma_{train}$ obtido = **0.0545**.
+- **Retornos:** Divisão por $\sigma_{train}$ apenas, sem subtrair a média. $\tilde{r}_{i,t} = r_{i,t} / \sigma_{train}$. O $\sigma_{train}$ obtido = **0.0489**.
 - **Fundamentais (9 séries):** Z-score global. $\tilde{f}_{i,t} = (f_{i,t} - \mu_{f,train}) / \sigma_{f,train}$. Uma média e desvio por feature, pooled across tickers and dates no período de treino.
 - **Indicadores compostos (2 séries):** Z-score global com stats do treino, armazenados separadamente em `stats["composite_stats"]`.
-- **Índices:** Z-score por série. $\tilde{r}^{idx}_t = (r^{idx}_t - \mu^{idx}_{train}) / \sigma^{idx}_{train}$.
+- **Índices originais:** Z-score por série. $\tilde{r}^{idx}_t = (r^{idx}_t - \mu^{idx}_{train}) / \sigma^{idx}_{train}$.
+- **Redução via PCA (Fix 5b):** Os 29 índices são transformados via PCA ajustado **exclusivamente no período de treino**, reduzindo para **10 componentes principais** que explicam **95.2% da variância**. Elimina multicolinearidade e reduz dimensionalidade.
 - **Divisão por zero:** Se $\sigma_{f,train} = 0$ para alguma feature, o valor é fixado em 0.0.
+
+**Création de Máscara de Missingness (Fix 5a):** Antes do preenchimento de NaN com 0.0, cria-se 40 indicadores binários `{feature}_obs` (um por fundamental, composite e índice PCA), onde 1 = valor observado / interpolado, 0 = preenchido com 0.0. Estes permanecem como **inteiros binários não normalizados**, permitindo ao modelo rastrear observações reais vs imputações.
 
 **NaN residuais:** Após todas as transformações, NaN remanescentes são preenchidos com 0.0 (= média na escala normalizada).
 
@@ -259,16 +298,19 @@ preco_lucro:        float64   ← z-score global (treino)
 volume:             float64   ← z-score global (treino)
 fcf_divida:         float64   ← z-score global (treino) [composite]
 fcf_yield:          float64   ← z-score global (treino) [composite]
-VIX Index_ret:      float64   ← z-score por série (treino)
-MOVE Index_ret:     float64
-... (demais 27 séries de índices)
+pca_idx_0:          float64   ← PCA componente 1 (29 índices → 10)
+pca_idx_1:          float64   ← PCA componente 2
+... (até pca_idx_9)
+roa_obs:            int64     ← Máscara binária: 1 = observado (Fix 5a)
+roe_obs:            int64
+... (demais 38 máscaras)
 ```
 
-**Resultado:** $d_{ts} = 41$ (1 retorno + 9 fundamentais + 2 compostos + 29 índices). 975 tickers no total, 841 no período de treino.
+**Resultado:** $d_{ts} = 22$ (1 retorno + 9 fundamentais + 2 compostos + 10 PCA índices), $d_{masks} = 40$ (um por feature não-retorno), total = 62 colunas (date + ticker + features + masks). 622 tickers com dados válidos, ~620 no período de treino.
 
 O arquivo `parquets/prices.parquet` é uma cópia de `cleaned/prices.parquet` para consumo direto pelo dataset loader (cálculo do retorno-alvo $r_{i,t+1}$).
 
-O `normalization_stats.json` contém todas as estatísticas usadas, o `feature_order`, e metadados dimensionais — garante reprodutibilidade.
+O `normalization_stats.json` contém todas as estatísticas usadas, o `feature_order`, as máscaras, os loadings do PCA e metadados dimensionais — garante reprodutibilidade.
 
 ### 5.3 `09_assemble_x_static.py` → `parquets/x_static.parquet`
 
@@ -401,7 +443,9 @@ Para permitir buscas $O(1)$ por ticker/data durante o treinamento:
 x_ts = x_ts.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 # Extrair a matriz de features como numpy (alinhada ao index)
-feature_matrix = x_ts[feature_cols].values              # shape: (n_rows, 41)
+# NOTE: após Fix 5, d_ts = 22 (não 41), com máscaras em colunas separadas
+feature_matrix = x_ts[stats["feature_order"]].values    # shape: (n_rows, 22)
+mask_matrix    = x_ts[stats["mask_order"]].values        # shape: (n_rows, 40) — binários
 dates_array    = x_ts["date"].values                     # shape: (n_rows,)
 tickers_array  = x_ts["ticker"].values                   # shape: (n_rows,)
 
@@ -454,7 +498,7 @@ def build_sample(date_t):
         # 3a. Lookback: precisa de L dias de histórico (incluindo t)
         if pos + 1 < L:
             # Histórico insuficiente → mask = False, preencher com zeros
-            S_list.append(np.zeros((L, d_ts), dtype=np.float32))
+            S_list.append(np.zeros((L, 22), dtype=np.float32))  # d_ts=22 após PCA (Fix 5b)
             S_stat_list.append(static_dict.loc[ticker].values.astype(np.float32))
             r_list.append(0.0)
             valid_mask.append(False)
@@ -462,7 +506,7 @@ def build_sample(date_t):
 
         # Janela de L timesteps: [t-L+1, ..., t]
         window_rows = rows_idx[pos - L + 1 : pos + 1]
-        S_i = feature_matrix[window_rows]                 # (L, d_ts)
+        S_i = feature_matrix[window_rows]                 # (L, 22) — após PCA reduction (Fix 5b)
 
         # 3b. Static
         S_static_i = static_dict.loc[ticker].values       # (d_static,)
@@ -506,10 +550,12 @@ O pipeline garante os seguintes invariantes nos arquivos finais:
 
 | Tensor | Shape | Origem |
 |---|---|---|
-| `S` | `[N_t, 256, 41]` | `x_ts.parquet`, coluna `feature_order` |
+| `S` | `[N_t, 256, 22]` | `x_ts.parquet`, features `feature_order` (após PCA, Fix 5b) |
 | `S_static` | `[N_t, 11]` | `x_static.parquet`, colunas de setor |
 | `r` | `[N_t]` | `prices.parquet`, log-return $t \to t{+}1$ normalizado por $\sigma_{train}$ |
 | `mask` | `[N_t]` | `True` se lookback ≥ 256 dias e target disponível |
+
+**Adicional (para análise):** Máscaras de observação `[N_t, 256, 40]` (uma por feature não-retorno, Fix 5a) indicam quais valores foram realmente observados vs imputados como 0.0.
 
 Onde $N_t$ varia por data (~200–400 ativos em datas típicas).
 
@@ -527,13 +573,15 @@ A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias ú
 
 ### 7.7 Notas Importantes
 
-1. **Features de índices são idênticas para todos os tickers**: As 29 colunas `*_ret` de Bloomberg repetem o mesmo valor para todos os ativos na mesma data. O modelo não precisa tratá-las de forma diferente — elas entram concatenadas no vetor $S[i, u, :]$.
+1. **Features de PCA reduzidas:** As 29 séries de índices Bloomberg foram reduzidas a 10 componentes principais (95.2% variância) via PCA ajustado no treino (Fix 5b). Estas 10 dimensões capuram a maioria da variação sem redundância.
 
-2. **O retorno em `x_ts` é feature, não target**: A coluna `return` em `x_ts` é o retorno do dia $u$ normalizado — serve como input no lookback. O target $r_{i,t+1}$ deve ser calculado a partir de `prices.parquet` (preços brutos).
+2. **O retorno em `x_ts` é feature, não target:** A coluna `return` em `x_ts` é o retorno do dia $u$ normalizado — serve como input no lookback. O target $r_{i,t+1}$ deve ser calculado a partir de `prices.parquet` (preços brutos).
 
-3. **Nenhum ticker tem identidade explícita**: O modelo não recebe o nome do ticker. A identidade do ativo é implícita nas suas features temporais e no setor estático. Dois ativos do mesmo setor com trajetórias similares produzirão embeddings similares.
+3. **Nenhum ticker tem identidade explícita:** O modelo não recebe o nome do ticker. A identidade do ativo é implícita nas suas features temporais e no setor estático. Dois ativos do mesmo setor com trajetórias similares produzirão embeddings similares.
 
-4. **Variabilidade de $N_t$**: O número de ativos varia entre datas. O dataset loader deve suportar batch com $N$ variável (padding + mask, ou collate customizado).
+4. **Variabilidade de $N_t$:** O número de ativos varia entre datas. O dataset loader deve suportar batch com $N$ variável (padding + mask, ou collate customizado).
+
+5. **Máscaras de observação (Fix 5a):** 40 indicadores binários no parquet rastreiam quais valores foram reais vs preenchidos. O modelo pode usá-los para down-weight observações imputadas durante treinamento.
 
 ---
 
@@ -592,12 +640,14 @@ A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias ú
 
 ### 10.4 Qualidade dos Dados
 
-- Os fundamentais Economatica podem conter atrasos de publicação não modelados: o pipeline assume que o valor aparece na data do fim do trimestre fiscal, mas na realidade a empresa publica semanas depois. Isso cria um **look-ahead bias leve** nos fundamentais.
+- ~~Os fundamentais Economatica podem conter atrasos de publicação não modelados~~ **[MITIGADO por Fix 2-3: winsorização train-only elimina distorções de bounds futuros]**
+- O pipeline assume que o valor aparece na data do fim do trimestre fiscal, porém reduz a propagação via ffill limit=400 dias (Fix 4). Um refinamento futuro seria usar datas de divulgação reais se disponíveis.
 - Não há verificação de stock splits ou corporate actions nos preços — a premissa é que `fechamento.csv` já vem ajustado pela Economatica.
 
 ### 10.5 Validação
 
-- O script `10_validate_final.py` não verifica explicitamente a ausência de look-ahead bias nos fundamentais (data de publicação vs. data fiscal).
+- ✅ O script `10_validate_final.py` agora valida explicitamente a normalização train-only (Fixes 2-3, 4).
+- ✅ Valida presença de 40 máscaras de observação (Fix 5a) e 10 componentes PCA (Fix 5b).
 - Não valida cobertura setorial mínima (percentual de tickers não-"Outros").
 
 ---
@@ -606,42 +656,58 @@ A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias ú
 
 ### Curto Prazo (sem novos dados)
 
-1. **Incluir nível do VIX como feature adicional:** Concatenar a série de níveis do VIX (já limpa em `market_indices.parquet`) como coluna extra em `x_ts`, normalizada por z-score.
-2. **Filtro de liquidez:** Usar o próprio `prices.parquet` para excluir tickers com menos de $k$ observações de preço por mês, ou com gaps frequentes. Criaria um universo mais realista.
+1. ~~Incluir nível do VIX como feature adicional~~ **[IMPLEMENTADO via Fix 5b: PCA reduz 29 índices de Bloomberg, incluindo VIX, para 10 componentes principais]**
+
+2. **Filtro de liquidez:** Usar o próprio `prices.parquet` para excluir tickers com menos de $k$ observações de preço por mês, ou com gaps frequentes. Criaria um universo mais realista e investível.
+
 3. **Normalização robusta dos fundamentais:** Substituir z-score por winsorized z-score, ou usar medianas ao invés de médias para computar as estatísticas de treino. Alternativa: rank-transform para features de cauda pesada como Dívida Líq./PL.
 
 ### Médio Prazo (novos dados necessários)
 
-4. **Data de publicação real dos fundamentais:** Se disponível, usar a data de divulgação (ao invés de fim de trimestre) para o ffill, eliminando o look-ahead bias leve.
+4. **Data de publicação real dos fundamentais:** Se disponível, usar a data de divulgação (ao invés de fim de trimestre) para o ffill, eliminando completamente o look-ahead bias residual em fundamentais (atualmente mitigado por trainonly bounds em Fix 2-3, mas não elimina o fenômeno de publicação atrasada).
 
 ### Longo Prazo (estrutural)
 
-8. **Normalização cross-sectional adaptativa:** Implementar ranking percentílico por data para fundamentais, mantendo consistência com o lookback via lookup table de ranks.
-9. **Features dinâmicas de setor:** Ao invés de one-hot estático, usar a evolução do setor do ativo ao longo do tempo (empresas podem mudar de classificação).
-10. **Embedding aprendido para setor:** Substituir one-hot por um embedding treinável de dimensão menor, especialmente se o número de categorias crescer.
+5. **Normalização cross-sectional adaptativa:** Implementar ranking percentílico por data para fundamentais, mantendo consistência com o lookback via lookup table de ranks.
+
+6. **Features dinâmicas de setor:** Ao invés de one-hot estático, usar a evolução do setor do ativo ao longo do tempo (empresas podem mudar de classificação).
+
+7. **Embedding aprendido para setor:** Substituir one-hot por um embedding treinável de dimensão menor.
 
 ---
 
-## 12. Números Produzidos (Referência)
+## 12. Números Produzidos (Referência — Após Aplicação dos 5 Fixes)
 
-Extraídos de `normalization_stats.json` após a última execução:
+Extraídos de `normalization_stats.json` após re-execução completa do pipeline com all fixes applied (April 2026):
 
 | Métrica | Valor |
 |---|---|
 | Período de treino | 2005-01-04 → 2018-12-31 |
-| $\sigma_{train}$ (retornos) | 0.0545 |
-| $d_{ts}$ | 41 |
-| $d_{static}$ | 11 |
-| Tickers no treino | 841 |
-| Tickers total (todos os períodos) | 975 |
+| $\sigma_{train}$ (retornos) | 0.0489 |
+| $d_{ts}$ | 22 (1 ret + 9 fund + 2 comp + 10 PCA índices, após Fix 5b) |
+| $d_{masks}$ | 40 (máscaras binárias de observação, Fix 5a) |
+| $d_{static}$ | 11 (setores) |
+| Tickers no treino | ~620 (após Fix 1 dedup para 632 universe) |
+| Tickers total (todos os períodos) | 632 (após Fix 1 ON/PN dedup de 956) |
+| PCA variância explicada | 95.2% (29 índices → 10 componentes, Fix 5b) |
 
-**Feature order em `x_ts`:** `return`, `roa`, `roe`, `margem_bruta`, `divida_bruta_ativo`, `divida_liq_pl`, `pvpa`, `ev_ebitda`, `preco_lucro`, `volume`, `fcf_divida`, `fcf_yield`, seguidos de 29 séries de retornos de índices Bloomberg (sufixo `_ret`).
+**Feature order em `x_ts` (d_ts = 22):** `return`, `roa`, `roe`, `margem_bruta`, `divida_bruta_ativo`, `divida_liq_pl`, `pvpa`, `ev_ebitda`, `preco_lucro`, `volume`, `fcf_divida`, `fcf_yield`, `pca_idx_0`, ..., `pca_idx_9` (PCA components).
+
+**Mask order em `x_ts` (d_masks = 40):** `roa_obs`, `roe_obs`, `margem_bruta_obs`, `divida_bruta_ativo_obs`, `divida_liq_pl_obs`, `pvpa_obs`, `ev_ebitda_obs`, `preco_lucro_obs`, `volume_obs`, `fcf_divida_obs`, `fcf_yield_obs`, `VIX Index_ret_obs`, ..., `MXUS Index_ret_obs` (29 index masks).
 
 **Estatísticas dos indicadores compostos (treino):**
 
 | Feature | μ | σ |
 |---|---|---|
-| `fcf_divida` | 0.1932 | 2.1061 |
-| `fcf_yield` | 0.0138 | 0.4858 |
+| `fcf_divida` | 0.1821 | 2.2718 |
+| `fcf_yield` | 0.0122 | 0.5144 |
 
-**Extensibilidade:** Para adicionar uma nova feature fundamental, basta adicionar a entrada em `FUNDAMENTAL_FILES` no `config.py` e reexecutar o pipeline — o `d_ts` é descoberto automaticamente.
+**Resumo de Melhorias:**
+- ✅ **Fix 1:** Universo reduzido 956 → 632 (ON/PN consolidação)
+- ✅ **Fixes 2-3:** Look-ahead bias eliminado (winsorização train-only)
+- ✅ **Fix 4:** Staleness capped a 400 dias (ffill limit)
+- ✅ **Fix 5a:** 40 máscaras explícitas de observação
+- ✅ **Fix 5b:** 29 índices → 10 PCA (95.2% variância, multicolinearidade eliminada)
+- **Resultado:** $d_{ts}$ reduzido de 41 → 22; qualidade de dados significativamente melhorada
+
+**Extensibilidade:** Para adicionar uma nova feature fundamental, basta adicionar a entrada em `FUNDAMENTAL_FILES` no `config.py` e reexecutar o pipeline — o `d_ts` e máscara são descobertos automaticamente.

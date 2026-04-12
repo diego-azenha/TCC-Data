@@ -3,18 +3,22 @@
 1. Merge returns + fundamentals + index_returns
 2. Compute train-period normalization stats
 3. Normalize: returns by σ only, fundamentals by z-score, indices by z-score
-4. Fill remaining NaN with 0.0
-5. Save x_ts.parquet + normalization_stats.json + prices.parquet (copy to parquets/)
+4. Create missingness masks ({col}_obs) BEFORE filling NaN
+5. Apply PCA to z-scored indices (reduce 29 → 10 components)
+6. Fill remaining NaN with 0.0
+7. Save x_ts.parquet + normalization_stats.json + prices.parquet (copy to parquets/)
 """
 from __future__ import annotations
 
 import json
 
 import pandas as pd
+from sklearn.decomposition import PCA
 
 from config import CLEANED, FEATURES, FUNDAMENTAL_FILES, PARQUETS, TRAIN_END
 
 COMPOSITE_COLS = ["fcf_divida", "fcf_yield"]
+N_PCA_COMPONENTS = 10
 
 
 def main() -> None:
@@ -55,7 +59,7 @@ def main() -> None:
 
     stats: dict = {
         "train_period": {"start": str(train["date"].min().date()), "end": TRAIN_END},
-        "feature_order": feature_cols,
+        "feature_order": None,  # Will be set after PCA
     }
 
     # Returns: normalize by σ only (no mean subtraction)
@@ -99,14 +103,57 @@ def main() -> None:
         else:
             x_ts[col] = 0.0
 
+    # --- Create missingness masks BEFORE filling NaN ---
+    mask_cols = {}
+    for col in fund_cols + COMPOSITE_COLS + idx_ret_cols:
+        mask_col = f"{col}_obs"
+        mask_cols[mask_col] = x_ts[col].notna().astype(int)
+        x_ts[mask_col] = mask_cols[mask_col]
+        pct = 100 * mask_cols[mask_col].mean()
+        print(f"      {mask_col}: {pct:.1f}% obs")
+
     # --- Fill remaining NaN with 0.0 ---
-    nan_before = x_ts[feature_cols].isna().sum().sum()
-    x_ts[feature_cols] = x_ts[feature_cols].fillna(0.0)
+    nan_before = x_ts[feature_cols + list(mask_cols.keys())].isna().sum().sum()
+    x_ts[feature_cols + list(mask_cols.keys())] = x_ts[feature_cols + list(mask_cols.keys())].fillna(0.0)
     print(f"      NaN filled: {nan_before} cells → 0.0")
+
+    # --- Apply PCA to z-scored indices (reduce 29 → 10) ---
+    print(f"      Applying PCA to {len(idx_ret_cols)} indices → {N_PCA_COMPONENTS} components ...")
+    X_idx_train = train[idx_ret_cols].fillna(0.0).values
+    pca = PCA(n_components=N_PCA_COMPONENTS, random_state=42)
+    pca.fit(X_idx_train)
+    
+    X_idx_all = x_ts[idx_ret_cols].values
+    X_pca = pca.transform(X_idx_all)
+    
+    pca_cols = [f"pca_idx_{i}" for i in range(N_PCA_COMPONENTS)]
+    for i, col in enumerate(pca_cols):
+        x_ts[col] = X_pca[:, i]
+    
+    explained_var = pca.explained_variance_ratio_.sum()
+    print(f"      PCA fit on train: {explained_var:.1%} variance explained")
+    stats["pca_stats"] = {
+        "n_components": N_PCA_COMPONENTS,
+        "explained_variance_ratio": float(explained_var),
+        "loadings": {col: pca.components_.tolist() for col in idx_ret_cols},
+    }
+
+    # --- Remove raw index columns (replaced by PCA) ---
+    x_ts = x_ts.drop(columns=idx_ret_cols)
+
+    # --- Build final feature order ---
+    feature_cols = ["return"] + fund_cols + COMPOSITE_COLS + pca_cols
+    final_mask_cols = list(mask_cols.keys())
+    
+    stats["feature_order"] = feature_cols
+    stats["mask_order"] = final_mask_cols
 
     # --- Add metadata ---
     d_ts = len(feature_cols)
+    d_masks = len(final_mask_cols)
     stats["d_ts"] = d_ts
+    stats["d_masks"] = d_masks
+    stats["d_total"] = d_ts + d_masks
     stats["n_tickers_total"] = int(x_ts["ticker"].nunique())
     stats["n_tickers_train"] = int(train["ticker"].nunique())
 
@@ -114,7 +161,7 @@ def main() -> None:
     out_ts = PARQUETS / "x_ts.parquet"
     x_ts.to_parquet(out_ts, index=False)
     print(f"      Saved: {out_ts}")
-    print(f"      Shape: {x_ts.shape}, d_ts={d_ts}")
+    print(f"      Shape: {x_ts.shape}, d_ts={d_ts}, d_masks={d_masks}, d_total={d_ts + d_masks}")
     print(f"      Dates: {x_ts['date'].min().date()} → {x_ts['date'].max().date()}")
 
     # --- Save normalization stats ---

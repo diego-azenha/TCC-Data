@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from config import CLEANED, FUNDAMENTAL_FILES, MIN_DATE, RAW_ECO
+from config import CLEANED, FUNDAMENTAL_FILES, MIN_DATE, RAW_ECO, TRAIN_END
 from io_utils import read_economatica_wide
 
 
@@ -28,11 +28,12 @@ def main() -> None:
         df = df[df["ticker"].isin(valid_tickers)]
         df = df[df["date"] >= pd.Timestamp(MIN_DATE)]
 
-        # Winsorize at 1st/99th percentile to cap extreme outliers
-        p01 = df[col_name].quantile(0.01)
-        p99 = df[col_name].quantile(0.99)
+        # Winsorize at 1st/99th percentile (calculated on train set only)
+        train_df = df[df["date"] <= pd.Timestamp(TRAIN_END)]
+        p01 = train_df[col_name].quantile(0.01)
+        p99 = train_df[col_name].quantile(0.99)
         df[col_name] = df[col_name].clip(lower=p01, upper=p99)
-        print(f"      {col_name} winsorized to [{p01:.2f}, {p99:.2f}]")
+        print(f"      {col_name} winsorized to [{p01:.2f}, {p99:.2f}] (train-only bounds)")
 
         df = df.sort_values(["date", "ticker"]).reset_index(drop=True)
 

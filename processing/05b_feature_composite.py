@@ -20,14 +20,20 @@ from __future__ import annotations
 
 import pandas as pd
 
-from config import CLEANED, FEATURES, FCF_PATH, DIVIDA_TOTAL_PATH, MKTCAP_PATH, MIN_DATE
+from config import CLEANED, FEATURES, FCF_PATH, DIVIDA_TOTAL_PATH, MKTCAP_PATH, MIN_DATE, TRAIN_END
 from io_utils import read_economatica_wide
 
 
-def _winsorize(s: pd.Series, lo: float = 0.01, hi: float = 0.99) -> pd.Series:
-    """Winsorize a series at empirical quantiles, ignoring NaN."""
-    q_lo = s.quantile(lo)
-    q_hi = s.quantile(hi)
+def _winsorize(s: pd.Series, mask: pd.Series | None = None, lo: float = 0.01, hi: float = 0.99) -> pd.Series:
+    """Winsorize a series at empirical quantiles.
+    If mask is provided (boolean Series), calculate quantiles only on mask==True.
+    """
+    if mask is not None:
+        q_lo = s[mask].quantile(lo)
+        q_hi = s[mask].quantile(hi)
+    else:
+        q_lo = s.quantile(lo)
+        q_hi = s.quantile(hi)
     return s.clip(lower=q_lo, upper=q_hi)
 
 
@@ -62,10 +68,16 @@ def main() -> None:
     divida = divida[divida["ticker"].isin(valid_tickers) & (divida["date"] >= pd.Timestamp(MIN_DATE))].copy()
     mktcap = mktcap[mktcap["ticker"].isin(valid_tickers) & (mktcap["date"] >= pd.Timestamp(MIN_DATE))].copy()
 
-    # --- Winsorize raw inputs ---
-    fcf["fcf"] = _winsorize(fcf["fcf"])
-    divida["divida_total"] = _winsorize(divida["divida_total"])
-    mktcap["mktcap"] = _winsorize(mktcap["mktcap"])
+    # --- Create train masks for winsorization ---
+    train_end_ts = pd.Timestamp(TRAIN_END)
+    fcf_train_mask = fcf["date"] <= train_end_ts
+    divida_train_mask = divida["date"] <= train_end_ts
+    mktcap_train_mask = mktcap["date"] <= train_end_ts
+
+    # --- Winsorize raw inputs (using train data only) ---
+    fcf["fcf"] = _winsorize(fcf["fcf"], mask=fcf_train_mask)
+    divida["divida_total"] = _winsorize(divida["divida_total"], mask=divida_train_mask)
+    mktcap["mktcap"] = _winsorize(mktcap["mktcap"], mask=mktcap_train_mask)
 
     # =========================================================
     # FCF / Dívida
@@ -81,8 +93,9 @@ def main() -> None:
     fd["fcf_divida"] = fd["fcf"] / fd["divida_total"]
     fd = fd[["date", "ticker", "fcf_divida"]].dropna(subset=["fcf_divida"])
 
-    # Winsorize ratio
-    fd["fcf_divida"] = _winsorize(fd["fcf_divida"])
+    # Winsorize ratio (using train data bounds only)
+    fd_train_mask = fd["date"] <= train_end_ts
+    fd["fcf_divida"] = _winsorize(fd["fcf_divida"], mask=fd_train_mask)
 
     # Forward-fill to daily calendar
     fd_daily = pd.merge(daily_calendar, fd, on=["date", "ticker"], how="left")
@@ -115,8 +128,9 @@ def main() -> None:
     fy["fcf_yield"] = fy["fcf"] / fy["mktcap"]
     fy = fy[["date", "ticker", "fcf_yield"]]
 
-    # Winsorize ratio
-    fy["fcf_yield"] = _winsorize(fy["fcf_yield"])
+    # Winsorize ratio (using train data bounds only)
+    fy_train_mask = fy["date"] <= train_end_ts
+    fy["fcf_yield"] = _winsorize(fy["fcf_yield"], mask=fy_train_mask)
 
     out_fy = FEATURES / "fcf_yield.parquet"
     fy.to_parquet(out_fy, index=False)
