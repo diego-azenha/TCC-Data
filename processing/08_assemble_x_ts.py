@@ -13,12 +13,13 @@ from __future__ import annotations
 import json
 
 import pandas as pd
-from sklearn.decomposition import PCA
 
 from config import CLEANED, FEATURES, FUNDAMENTAL_FILES, PARQUETS, TRAIN_END
 
 COMPOSITE_COLS = ["fcf_divida", "fcf_yield"]
-N_PCA_COMPONENTS = 10
+# MSCI indices: keep only 4 most relevant for Brazil
+MSCI_TO_KEEP = {"MXEF Index_ret", "MXUS Index_ret", "MXEU Index_ret", "MXLA Index_ret"}
+MSCI_TO_DROP = {"MXCN Index_ret", "MXJP Index_ret", "MXGB Index_ret", "MXCA Index_ret", "MXPCJ Index_ret"}
 
 
 def main() -> None:
@@ -48,10 +49,14 @@ def main() -> None:
     x_ts = x_ts.sort_values(["date", "ticker"]).reset_index(drop=True)
 
     # --- Identify column groups ---
-    idx_ret_cols = [c for c in index_returns.columns if c != "date"]
+    all_idx_cols = [c for c in index_returns.columns if c != "date"]
+    # Filter MSCI: drop irrelevant ones, keep only 4
+    idx_ret_cols = [c for c in all_idx_cols if c not in MSCI_TO_DROP]
     feature_cols = ["return"] + fund_cols + COMPOSITE_COLS + idx_ret_cols
 
     print(f"      Features: {len(feature_cols)} ({1} return + {len(fund_cols)} fund + {len(COMPOSITE_COLS)} composite + {len(idx_ret_cols)} indices)")
+    print(f"      MSCI kept: {sorted([c for c in idx_ret_cols if 'MSCI' in str(index_returns.columns)])}")
+    print(f"      MSCI dropped: {sorted(MSCI_TO_DROP)}")
 
     # --- Compute train-period stats ---
     train_mask = x_ts["date"] <= pd.Timestamp(TRAIN_END)
@@ -117,32 +122,16 @@ def main() -> None:
     x_ts[feature_cols + list(mask_cols.keys())] = x_ts[feature_cols + list(mask_cols.keys())].fillna(0.0)
     print(f"      NaN filled: {nan_before} cells → 0.0")
 
-    # --- Apply PCA to z-scored indices (reduce 29 → 10) ---
-    print(f"      Applying PCA to {len(idx_ret_cols)} indices → {N_PCA_COMPONENTS} components ...")
-    X_idx_train = train[idx_ret_cols].fillna(0.0).values
-    pca = PCA(n_components=N_PCA_COMPONENTS, random_state=42)
-    pca.fit(X_idx_train)
-    
-    X_idx_all = x_ts[idx_ret_cols].values
-    X_pca = pca.transform(X_idx_all)
-    
-    pca_cols = [f"pca_idx_{i}" for i in range(N_PCA_COMPONENTS)]
-    for i, col in enumerate(pca_cols):
-        x_ts[col] = X_pca[:, i]
-    
-    explained_var = pca.explained_variance_ratio_.sum()
-    print(f"      PCA fit on train: {explained_var:.1%} variance explained")
-    stats["pca_stats"] = {
-        "n_components": N_PCA_COMPONENTS,
-        "explained_variance_ratio": float(explained_var),
-        "loadings": {col: pca.components_.tolist() for col in idx_ret_cols},
+    # --- PCA NOT applied: keeping {len(idx_ret_cols)} indices as-is ---
+    print(f"      Keeping {len(idx_ret_cols)} indices without PCA (no reduction)")
+    stats["indices_stats"] = {
+        "n_indices": len(idx_ret_cols),
+        "indices_kept": idx_ret_cols,
+        "msci_dropped": sorted(MSCI_TO_DROP),
     }
 
-    # --- Remove raw index columns (replaced by PCA) ---
-    x_ts = x_ts.drop(columns=idx_ret_cols)
-
-    # --- Build final feature order ---
-    feature_cols = ["return"] + fund_cols + COMPOSITE_COLS + pca_cols
+    # --- Build final feature order (no PCA columns) ---
+    feature_cols = ["return"] + fund_cols + COMPOSITE_COLS + idx_ret_cols
     final_mask_cols = list(mask_cols.keys())
     
     stats["feature_order"] = feature_cols

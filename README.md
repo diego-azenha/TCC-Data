@@ -115,10 +115,10 @@ Em April 2026, foram identificadas e corrigidas **5 problemas críticos de quali
 
 **Solução:** Criação de 40 indicadores binários `{feature}_obs` (um por fundamental, composite e índice), registrando True/False **antes** do preenchimento com 0.0. Modelo explicitamente rastreia observações vs imputações.
 
-### Fix 5b: Redução Dimensional via PCA
-**Problema:** 29 séries de índices Bloomberg eram altamente correlacionadas e redundantes (múltiplas séries para Brasil, renda fixa, commodities globais).
+### Fix 5b: Seleção de Índices MSCI (Sem PCA)
+**Problema:** 29 séries de índices Bloomberg incluem 9 índices MSCI internacionais, dos quais apenas 4 são relevantes para o Brasil. Os 5 restantes (China, Japan, UK, Canada, Pacific ex-Japan) contribuem pouco para um modelo de equities brasileiras.
 
-**Solução:** PCA ajustado **exclusivamente no período de treino**, reduzindo 29 → 10 componentes principais (95.2% de variância explicada). Elimina multicolinearidade e reduz `d_ts` de 41 → 22.
+**Solução:** Remover os 5 MSCI irrelevantes e manter apenas os 4 mais apropriados (Emerging Markets, USA, Europe, Latin America). Os 21 índices restantes (Risco, Brasil Macro, Brasil Equity Factors, Renda Fixa, Commodities) são mantidos sem redução dimensional. Todas as 25 séries de índices permanecem na dimensionalidade original, sem PCA. Resultado: redução de 29 → 25 índices com cobertura temática mantida.
 
 ---
 
@@ -273,8 +273,8 @@ Definido em `config.py`:
 - **Retornos:** Divisão por $\sigma_{train}$ apenas, sem subtrair a média. $\tilde{r}_{i,t} = r_{i,t} / \sigma_{train}$. O $\sigma_{train}$ obtido = **0.0489**.
 - **Fundamentais (9 séries):** Z-score global. $\tilde{f}_{i,t} = (f_{i,t} - \mu_{f,train}) / \sigma_{f,train}$. Uma média e desvio por feature, pooled across tickers and dates no período de treino.
 - **Indicadores compostos (2 séries):** Z-score global com stats do treino, armazenados separadamente em `stats["composite_stats"]`.
-- **Índices originais:** Z-score por série. $\tilde{r}^{idx}_t = (r^{idx}_t - \mu^{idx}_{train}) / \sigma^{idx}_{train}$.
-- **Redução via PCA (Fix 5b):** Os 29 índices são transformados via PCA ajustado **exclusivamente no período de treino**, reduzindo para **10 componentes principais** que explicam **95.2% da variância**. Elimina multicolinearidade e reduz dimensionalidade.
+- **Índices:** Z-score temporal por série. $\tilde{r}^{idx}_t = (r^{idx}_t - \mu^{idx}_{train}) / \sigma^{idx}_{train}$. Sem redução dimensional (PCA não aplicado).
+- **Seleção de índices:** 5 MSCI irrelevantes removidos (MXCN, MXJP, MXGB, MXCA, MXPCJ); 4 MSCI mantidos (MXEF, MXUS, MXEU, MXLA); 21 outros índices preservados.
 - **Divisão por zero:** Se $\sigma_{f,train} = 0$ para alguma feature, o valor é fixado em 0.0.
 
 **Création de Máscara de Missingness (Fix 5a):** Antes do preenchimento de NaN com 0.0, cria-se 40 indicadores binários `{feature}_obs` (um por fundamental, composite e índice PCA), onde 1 = valor observado / interpolado, 0 = preenchido com 0.0. Estes permanecem como **inteiros binários não normalizados**, permitindo ao modelo rastrear observações reais vs imputações.
@@ -298,15 +298,15 @@ preco_lucro:        float64   ← z-score global (treino)
 volume:             float64   ← z-score global (treino)
 fcf_divida:         float64   ← z-score global (treino) [composite]
 fcf_yield:          float64   ← z-score global (treino) [composite]
-pca_idx_0:          float64   ← PCA componente 1 (29 índices → 10)
-pca_idx_1:          float64   ← PCA componente 2
-... (até pca_idx_9)
+VIX Index_ret:      float64   ← z-score (treino) [índice - 25 total, sem PCA]
+MOVE Index_ret:     float64
+... (outros 23 índices: Brasil macro, equity factors, renda fixa, commodities, 4 MSCI)
 roa_obs:            int64     ← Máscara binária: 1 = observado (Fix 5a)
 roe_obs:            int64
 ... (demais 38 máscaras)
 ```
 
-**Resultado:** $d_{ts} = 22$ (1 retorno + 9 fundamentais + 2 compostos + 10 PCA índices), $d_{masks} = 40$ (um por feature não-retorno), total = 62 colunas (date + ticker + features + masks). 622 tickers com dados válidos, ~620 no período de treino.
+**Resultado:** $d_{ts} = 37$ (1 retorno + 9 fundamentais + 2 compostos + 25 índices), $d_{masks} = 40$ (um por feature não-retorno), total = 77 colunas (date + ticker + features + masks). 622 tickers com dados válidos, ~620 no período de treino.
 
 O arquivo `parquets/prices.parquet` é uma cópia de `cleaned/prices.parquet` para consumo direto pelo dataset loader (cálculo do retorno-alvo $r_{i,t+1}$).
 
@@ -443,8 +443,8 @@ Para permitir buscas $O(1)$ por ticker/data durante o treinamento:
 x_ts = x_ts.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 # Extrair a matriz de features como numpy (alinhada ao index)
-# NOTE: após Fix 5, d_ts = 22 (não 41), com máscaras em colunas separadas
-feature_matrix = x_ts[stats["feature_order"]].values    # shape: (n_rows, 22)
+# NOTE: após Fix 5b (sem PCA), d_ts = 37 (não 41 e não 22), com máscaras em colunas separadas
+feature_matrix = x_ts[stats["feature_order"]].values    # shape: (n_rows, 37)
 mask_matrix    = x_ts[stats["mask_order"]].values        # shape: (n_rows, 40) — binários
 dates_array    = x_ts["date"].values                     # shape: (n_rows,)
 tickers_array  = x_ts["ticker"].values                   # shape: (n_rows,)
@@ -550,7 +550,7 @@ O pipeline garante os seguintes invariantes nos arquivos finais:
 
 | Tensor | Shape | Origem |
 |---|---|---|
-| `S` | `[N_t, 256, 22]` | `x_ts.parquet`, features `feature_order` (após PCA, Fix 5b) |
+| `S` | `[N_t, 256, 37]` | `x_ts.parquet`, features `feature_order` (sem PCA, Fix 5b) |
 | `S_static` | `[N_t, 11]` | `x_static.parquet`, colunas de setor |
 | `r` | `[N_t]` | `prices.parquet`, log-return $t \to t{+}1$ normalizado por $\sigma_{train}$ |
 | `mask` | `[N_t]` | `True` se lookback ≥ 256 dias e target disponível |
@@ -573,7 +573,7 @@ A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias ú
 
 ### 7.7 Notas Importantes
 
-1. **Features de PCA reduzidas:** As 29 séries de índices Bloomberg foram reduzidas a 10 componentes principais (95.2% variância) via PCA ajustado no treino (Fix 5b). Estas 10 dimensões capuram a maioria da variação sem redundância.
+1. **Índices sem redução dimensional:** As 29 séries de índices Bloomberg foram reduzidas a 25 (removidos 5 MSCI irrelevantes: MXCN, MXJP, MXGB, MXCA, MXPCJ). Sem PCA aplicado — toda a dimensionalidade original é preservada, mantendo interpretabilidade de cada série.
 
 2. **O retorno em `x_ts` é feature, não target:** A coluna `return` em `x_ts` é o retorno do dia $u$ normalizado — serve como input no lookback. O target $r_{i,t+1}$ deve ser calculado a partir de `prices.parquet` (preços brutos).
 
@@ -647,7 +647,7 @@ A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias ú
 ### 10.5 Validação
 
 - ✅ O script `10_validate_final.py` agora valida explicitamente a normalização train-only (Fixes 2-3, 4).
-- ✅ Valida presença de 40 máscaras de observação (Fix 5a) e 10 componentes PCA (Fix 5b).
+- ✅ Valida presença de 40 máscaras de observação (Fix 5a) e 25 índices mantidos (Fix 5b).
 - Não valida cobertura setorial mínima (percentual de tickers não-"Outros").
 
 ---
@@ -656,7 +656,7 @@ A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias ú
 
 ### Curto Prazo (sem novos dados)
 
-1. ~~Incluir nível do VIX como feature adicional~~ **[IMPLEMENTADO via Fix 5b: PCA reduz 29 índices de Bloomberg, incluindo VIX, para 10 componentes principais]**
+1. ~~Incluir nível do VIX como feature adicional~~ **[Nível do VIX não adicionado: apenas log-returns dos índices são usados. PCA removido em Fix 5b para manter interpretabilidade.]**
 
 2. **Filtro de liquidez:** Usar o próprio `prices.parquet` para excluir tickers com menos de $k$ observações de preço por mês, ou com gaps frequentes. Criaria um universo mais realista e investível.
 
@@ -684,14 +684,18 @@ Extraídos de `normalization_stats.json` após re-execução completa do pipelin
 |---|---|
 | Período de treino | 2005-01-04 → 2018-12-31 |
 | $\sigma_{train}$ (retornos) | 0.0489 |
-| $d_{ts}$ | 22 (1 ret + 9 fund + 2 comp + 10 PCA índices, após Fix 5b) |
+| $d_{ts}$ | 37 (1 ret + 9 fund + 2 comp + 25 índices, Fix 5b sem PCA) |
 | $d_{masks}$ | 40 (máscaras binárias de observação, Fix 5a) |
 | $d_{static}$ | 11 (setores) |
 | Tickers no treino | ~620 (após Fix 1 dedup para 632 universe) |
 | Tickers total (todos os períodos) | 632 (após Fix 1 ON/PN dedup de 956) |
-| PCA variância explicada | 95.2% (29 índices → 10 componentes, Fix 5b) |
+| Índices mantidos | 25 (21 não-MSCI + 4 MSCI: MXEF, MXUS, MXEU, MXLA) |
+| Índices removidos | 5 MSCI: MXCN, MXJP, MXGB, MXCA, MXPCJ |
 
-**Feature order em `x_ts` (d_ts = 22):** `return`, `roa`, `roe`, `margem_bruta`, `divida_bruta_ativo`, `divida_liq_pl`, `pvpa`, `ev_ebitda`, `preco_lucro`, `volume`, `fcf_divida`, `fcf_yield`, `pca_idx_0`, ..., `pca_idx_9` (PCA components).
+**Feature order em `x_ts` (d_ts = 37):** `return`, `roa`, `roe`, `margem_bruta`, `divida_bruta_ativo`, `divida_liq_pl`, `pvpa`, `ev_ebitda`, `preco_lucro`, `volume`, `fcf_divida`, `fcf_yield`, seguido por 25 índices Bloomberg (sem PCA): 3 risco/sentimento, 2 Brasil macro, 6 Brasil equity factors, 3 renda fixa, 6 commodities, 4 MSCI.
+
+**MSCI mantidos:** MXEF, MXUS, MXEU, MXLA
+**MSCI removidos:** MXCN, MXJP, MXGB, MXCA, MXPCJ
 
 **Mask order em `x_ts` (d_masks = 40):** `roa_obs`, `roe_obs`, `margem_bruta_obs`, `divida_bruta_ativo_obs`, `divida_liq_pl_obs`, `pvpa_obs`, `ev_ebitda_obs`, `preco_lucro_obs`, `volume_obs`, `fcf_divida_obs`, `fcf_yield_obs`, `VIX Index_ret_obs`, ..., `MXUS Index_ret_obs` (29 index masks).
 
@@ -707,7 +711,7 @@ Extraídos de `normalization_stats.json` após re-execução completa do pipelin
 - ✅ **Fixes 2-3:** Look-ahead bias eliminado (winsorização train-only)
 - ✅ **Fix 4:** Staleness capped a 400 dias (ffill limit)
 - ✅ **Fix 5a:** 40 máscaras explícitas de observação
-- ✅ **Fix 5b:** 29 índices → 10 PCA (95.2% variância, multicolinearidade eliminada)
-- **Resultado:** $d_{ts}$ reduzido de 41 → 22; qualidade de dados significativamente melhorada
+- ✅ **Fix 5b:** Seleção de índices (29 → 25), sem PCA (4 MSCI mantidos, 5 removidos)
+- **Resultado:** $d_{ts}$ mantém interpretabilidade (37 features), qualidade de dados significativamente melhorada
 
 **Extensibilidade:** Para adicionar uma nova feature fundamental, basta adicionar a entrada em `FUNDAMENTAL_FILES` no `config.py` e reexecutar o pipeline — o `d_ts` e máscara são descobertos automaticamente.
