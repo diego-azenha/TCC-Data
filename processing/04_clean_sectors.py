@@ -1,7 +1,7 @@
 """04 — Clean sector classification → cleaned/sectors.parquet
 
-Reads setor_ibovespa.xlsx, extracts ticker and setor_economico,
-maps "-" to "Outros", and assigns integer sector_id.
+Reads setor_ibovespa.xlsx, extracts ticker, setor_economico, and subsetor.
+Maps "-" to "Outros" for both levels and assigns integer IDs.
 """
 from __future__ import annotations
 
@@ -18,25 +18,34 @@ def main() -> None:
     # Select relevant columns
     # Column names have newlines from the Excel export
     codigo_col = "Código"
-    setor_col = [c for c in df.columns if "Setor Econ" in c][0]
+    setor_col    = [c for c in df.columns if "Setor Econ" in c][0]
+    subsetor_col = [c for c in df.columns if "Subsetor" in c][0]
 
-    sectors = df[[codigo_col, setor_col]].copy()
-    sectors.columns = ["ticker", "setor_economico"]
+    sectors = df[[codigo_col, setor_col, subsetor_col]].copy()
+    sectors.columns = ["ticker", "setor_economico", "subsetor"]
 
     # Clean
-    sectors["ticker"] = sectors["ticker"].astype(str).str.strip()
+    sectors["ticker"]         = sectors["ticker"].astype(str).str.strip()
     sectors["setor_economico"] = sectors["setor_economico"].astype(str).str.strip()
+    sectors["subsetor"]        = sectors["subsetor"].astype(str).str.strip()
 
-    # Map "-" to "Outros"
+    # Map "-" to "Outros" for both levels
     sectors.loc[sectors["setor_economico"] == "-", "setor_economico"] = "Outros"
+    sectors.loc[sectors["subsetor"] == "-", "subsetor"] = "Outros"
 
     # Drop duplicates (keep first occurrence of each ticker)
     sectors = sectors.drop_duplicates(subset="ticker", keep="first")
 
-    # Assign integer sector_id (deterministic alphabetical order)
-    categories = sorted(sectors["setor_economico"].unique())
-    cat_to_id = {cat: i for i, cat in enumerate(categories)}
-    sectors["sector_id"] = sectors["setor_economico"].map(cat_to_id)
+    # Assign integer IDs (deterministic alphabetical order)
+    setor_cats = sorted(sectors["setor_economico"].unique())
+    sectors["sector_id"] = sectors["setor_economico"].map(
+        {cat: i for i, cat in enumerate(setor_cats)}
+    )
+
+    subsetor_cats = sorted(sectors["subsetor"].unique())
+    sectors["subsetor_id"] = sectors["subsetor"].map(
+        {cat: i for i, cat in enumerate(subsetor_cats)}
+    )
 
     sectors = sectors.sort_values("ticker").reset_index(drop=True)
 
@@ -45,9 +54,9 @@ def main() -> None:
 
     print(f"      Saved: {out}")
     print(f"      Tickers: {len(sectors)}")
-    print(f"      Sectors: {len(categories)}")
-    for cat in categories:
-        n = (sectors["setor_economico"] == cat).sum()
+    print(f"      Subsetores: {len(subsetor_cats)}")
+    for cat in subsetor_cats:
+        n = (sectors["subsetor"] == cat).sum()
         print(f"        {cat}: {n}")
 
 

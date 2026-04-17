@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import sys
 
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 import numpy as np
 import pandas as pd
 

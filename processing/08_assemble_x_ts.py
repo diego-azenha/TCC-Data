@@ -16,7 +16,7 @@ import pandas as pd
 
 from config import CLEANED, FEATURES, FUNDAMENTAL_FILES, PARQUETS, TRAIN_END
 
-COMPOSITE_COLS = ["fcf_divida", "fcf_yield"]
+COMPOSITE_COLS: list[str] = []  # fcf_divida and fcf_yield dropped (>18% missing)
 # MSCI indices: keep only 4 most relevant for Brazil
 MSCI_TO_KEEP = {"MXEF Index_ret", "MXUS Index_ret", "MXEU Index_ret", "MXLA Index_ret"}
 MSCI_TO_DROP = {"MXCN Index_ret", "MXJP Index_ret", "MXGB Index_ret", "MXCA Index_ret", "MXPCJ Index_ret"}
@@ -39,12 +39,6 @@ def main() -> None:
 
     # Merge index returns (broadcast: same for all tickers on a given date)
     x_ts = x_ts.merge(index_returns, on="date", how="left")
-
-    # Merge composite indicators
-    fcf_divida = pd.read_parquet(FEATURES / "fcf_divida_ffill.parquet")
-    fcf_yield = pd.read_parquet(FEATURES / "fcf_yield.parquet")
-    x_ts = x_ts.merge(fcf_divida, on=["date", "ticker"], how="left")
-    x_ts = x_ts.merge(fcf_yield, on=["date", "ticker"], how="left")
 
     x_ts = x_ts.sort_values(["date", "ticker"]).reset_index(drop=True)
 
@@ -158,6 +152,26 @@ def main() -> None:
     with open(out_stats, "w") as f:
         json.dump(stats, f, indent=2)
     print(f"      Saved: {out_stats}")
+
+    # --- Save returns-only subset ---
+    out_ret = PARQUETS / "x_ts_returns.parquet"
+    x_ts[["date", "ticker", "return"]].to_parquet(out_ret, index=False)
+    print(f"      Saved returns-only: {out_ret}  shape={x_ts[['date','ticker','return']].shape}")
+
+    # --- Save fundamentals subset (date, ticker, fund + composite cols + their obs masks) ---
+    fund_mask_cols = [f"{c}_obs" for c in fund_cols + COMPOSITE_COLS]
+    fund_subset_cols = ["date", "ticker"] + fund_cols + COMPOSITE_COLS + fund_mask_cols
+    out_fund = PARQUETS / "x_ts_fundamentals.parquet"
+    x_ts[fund_subset_cols].to_parquet(out_fund, index=False)
+    print(f"      Saved fundamentals: {out_fund}  shape={x_ts[fund_subset_cols].shape}")
+
+    # --- Save macro subset (wide: one row per date, idx_ret_cols + their obs masks) ---
+    macro_mask_cols = [f"{c}_obs" for c in idx_ret_cols]
+    macro_subset_cols = ["date"] + idx_ret_cols + macro_mask_cols
+    macro_wide = x_ts[macro_subset_cols].drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
+    out_macro = PARQUETS / "x_ts_macro.parquet"
+    macro_wide.to_parquet(out_macro, index=False)
+    print(f"      Saved macro: {out_macro}  shape={macro_wide.shape}")
 
     # --- Copy prices to parquets/ for the dataset loader ---
     prices = pd.read_parquet(CLEANED / "prices.parquet")

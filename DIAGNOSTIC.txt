@@ -1,0 +1,36 @@
+======================================================================
+3. MISSING DATA RATE PER SERIES
+   Denominator: full (date x ticker) calendar from prices.parquet.
+   Quarterly: pipeline ffill limit = 65 trading days (~1 quarter, fundamentals_ffill.parquet).        
+======================================================================
+
+Series                     Type                         Calendar    Missing   %Missing     Flag       
+--------------------------------------------------------------------------------------------
+roa                        quarterly (65d ffill)         820,011     64,494      7.87%
+roe                        quarterly (65d ffill)         820,011    103,586     12.63%   [>10%]       
+margem_bruta               quarterly (65d ffill)         820,011     73,711      8.99%
+divida_bruta_ativo         quarterly (65d ffill)         820,011     84,670     10.33%   [>10%]       
+divida_liq_pl              quarterly (65d ffill)         820,011     84,670     10.33%   [>10%]       
+pvpa                       daily (no ffill)              820,011     24,115      2.94%
+preco_lucro                daily (no ffill)              820,011     48,518      5.92%
+volume                     daily (no ffill)              820,011          0      0.00%
+return                     composite/feature             820,011        295      0.04%
+
+[FLAG] Series with >10% missing after ffill: roe, divida_bruta_ativo, divida_liq_pl
+
+======================================================================
+3b. MISSING DATA RATE -- IN-WINDOW ONLY
+    Denominator: trading days between first and last non-NaN observation
+    for each (ticker, series) pair. Pre-listing and post-delisting NaNs excluded.
+======================================================================
+Series                     Type                           Window    Missing   %Missing     Flag
+----------------------------------------------------------------------------------------------
+roa                        quarterly (65d ffill)         794,542     14,428      1.82%
+roe                        quarterly (65d ffill)         761,711     20,689      2.72%
+margem_bruta               quarterly (65d ffill)         786,158     15,261      1.94%
+divida_bruta_ativo         quarterly (65d ffill)         764,292      4,354      0.57%
+divida_liq_pl              quarterly (65d ffill)         764,292      4,354      0.57%
+pvpa                       daily (no ffill)              856,535          0      0.00%
+preco_lucro                daily (no ffill)              829,700          0      0.00%
+volume                     daily (no ffill)              820,944          0      0.00%
+return                     composite/feature             819,716          0      0.00%
