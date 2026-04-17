@@ -98,7 +98,7 @@ Em April 2026, foram identificadas e corrigidas **5 problemas críticos de quali
 ### Fix 2: Winsorização Train-Only em Fundamentais
 **Problema:** Em `processing/02_clean_fundamentals.py`, os bounds de winsorização (percentis 1% e 99%) eram calculados sobre **todo o dataset** (incluindo val/test), criando look-ahead bias.
 
-**Solução:** Bounds recalculados **exclusivamente no período de treino** (2005-01-04 → 2018-12-31) e aplicados de forma consistente a todos os períodos. Elimina contaminação de dados futuros nas estatísticas.
+**Solução:** Bounds recalculados **exclusivamente no período de treino** (2005-01-04 → 2019-12-31) e aplicados de forma consistente a todos os períodos. Elimina contaminação de dados futuros nas estatísticas.
 
 ### Fix 3: Winsorização Train-Only em Indicadores Compostos
 **Problema:** Em `processing/05b_feature_composite.py`, os indicadores FCF/Dívida e FCF Yield eram winzorizados com bounds do dataset completo.
@@ -119,6 +119,31 @@ Em April 2026, foram identificadas e corrigidas **5 problemas críticos de quali
 **Problema:** 29 séries de índices Bloomberg incluem 9 índices MSCI internacionais, dos quais apenas 4 são relevantes para o Brasil. Os 5 restantes (China, Japan, UK, Canada, Pacific ex-Japan) contribuem pouco para um modelo de equities brasileiras.
 
 **Solução:** Remover os 5 MSCI irrelevantes e manter apenas os 4 mais apropriados (Emerging Markets, USA, Europe, Latin America). Os 21 índices restantes (Risco, Brasil Macro, Brasil Equity Factors, Renda Fixa, Commodities) são mantidos sem redução dimensional. Todas as 25 séries de índices permanecem na dimensionalidade original, sem PCA. Resultado: redução de 29 → 25 índices com cobertura temática mantida.
+
+### Fix 6: Critério de Liquidez Simplificado e Train/Val Split Ajustado (Abril 2026)
+
+**Fix 6a — Critério de Liquidez Simplificado:**
+
+**Problema:** O critério original usava rolling median de 63 dias (1 trimestre) para filtrar tickers com volume ≥ R$5M em ≥ 10% dos dias de negociação. Este critério era confuso e suscetível a interpretações ambíguas sobre quais "dias" eram contados.
+
+**Solução:** Simplificação drástica em `processing/01_clean_prices.py`:
+- Novo critério: **Keep tickers where ≥ 90% of trading days have volume ≥ R$1M/day**
+- **Sem rolling window** — avaliação direta e determinística
+- **Contagem correta:** apenas dias com volume registrado (i.e., quando o ativo existiu e negociou) — pre-listing e post-delisting ignorados automaticamente
+- Limiar reduzido de R$5M para **R$1M** para permitir maior diversidade do universo
+- Resultado: **975 tickers brutos → 224 tickers após liquidez → 205 tickers após deduplicação ON/PN**
+- Seção 4 de `processing/diagnostics.py` adicionada para validar 100% conformidade com o critério
+
+**Fix 6b — Split Temporal Ajustado para Robustez:**
+
+**Problema:** O split original (train 2005–2018, val 2019–2022, test 2023+) incluía 2022 na validação, mas o bear market de 2022 era a primeira vez que o modelo via esse regime de volatilidade. Ao mesmo tempo, perdia 2022 completamente do teste.
+
+**Solução:** Shift para frente em `config.py` (Abril 2026):
+- **TRAIN_END:** 2017-12-31 → **2019-12-31** (estende train para 15 anos, captura COVID crash no treino)
+- **VAL_END:** 2021-12-31 → **2022-12-31** (val agora é 2020–2022, inclui pandemia inteira e bear market)
+- **Test:** agora começa 2023-01-01, período pós-bear market com regimes mais estabilizados
+- Trade-off: Treino mais longo captura volatilidade COVID; validação testa performance durante e após bear market; test é período de recuperação
+- Análise: Visualização de stocks disponíveis + BOVESPA cumulative returns com split overlaid em novo subplot de diagnostics
 
 ---
 
@@ -142,7 +167,7 @@ O pipeline se divide em 4 camadas, cada uma produzindo artefatos persistentes em
 
 | Arquivo | Papel |
 |---|---|
-| `processing/config.py` | Constantes globais: caminhos (`ROOT`, `RAW`, `CLEANED`, `FEATURES`, `PARQUETS`), split temporal (`TRAIN_END = "2018-12-31"`, `VAL_END = "2022-12-31"`, `MIN_DATE = "2005-01-03"`), mapa dos 9 CSVs de fundamentais (`FUNDAMENTAL_FILES` — 5 trimestrais + 4 diários: pvpa, ev_ebitda, preco_lucro, volume), e constantes de caminho para os 3 arquivos brutos dos indicadores compostos (`FCF_PATH`, `DIVIDA_TOTAL_PATH`, `MKTCAP_PATH`) |
+| `processing/config.py` | Constantes globais: caminhos (`ROOT`, `RAW`, `CLEANED`, `FEATURES`, `PARQUETS`), split temporal (`TRAIN_END = "2019-12-31"`, `VAL_END = "2022-12-31"`, `MIN_DATE = "2005-01-03"`), critério de liquidez (`VOL_THRESHOLD_K = 1_000` R$1M/day, `VOL_MIN_FRAC_ABOVE = 0.90` ≥90% dos dias úteis), mapa dos 9 CSVs de fundamentais (`FUNDAMENTAL_FILES` — 5 trimestrais + 4 diários: pvpa, ev_ebitda, preco_lucro, volume), e constantes de caminho para os 3 arquivos brutos dos indicadores compostos (`FCF_PATH`, `DIVIDA_TOTAL_PATH`, `MKTCAP_PATH`) |
 | `processing/io_utils.py` | Duas funções de leitura reutilizáveis: `read_economatica_wide()` para CSVs Economatica (wide → long, tratamento de `"-"` e duplicatas de coluna) e `read_bloomberg_indices()` para o Excel Bloomberg (5 sheets → DataFrame wide consolidado, deduplicação de colunas como BCOMINTR) |
 | `processing/run_all.py` | Orquestrador sequencial: importa e executa `main()` de cada script 01–10, com timing por etapa |
 
@@ -154,7 +179,9 @@ O pipeline se divide em 4 camadas, cada uma produzindo artefatos persistentes em
 
 Lê `fechamento.csv` via `read_economatica_wide()`. Remove preços ≤ 0, filtra para datas ≥ 2005-01-03.
 
-**Deduplicação ON/PN (Fix 1):** Para cada base de ticker (parte alfabética), seleciona-se apenas a classe de ação com máximo volume médio de negociação (ex: PETR4 sobre PETR3, VALE3 sobre VALE5). Reduz universo bruto de 956 para **632 tickers únicos**.
+**Filtro de Liquidez (Fix 6a):** Remove tickers onde < 90% dos dias de negociação têm volume ≥ R$1M/day. O critério é avaliado **exclusivamente sobre dias quando o ativo existiu** (não inclui períodos pré-listagem/pós-delisting). Universo reduzido: **975 brutos → 224 após critério de liquidez**.
+
+**Deduplicação ON/PN (Fix 1):** Para cada base de ticker (parte alfabética), seleciona-se apenas a classe de ação com máximo volume médio de negociação (ex: PETR4 sobre PETR3, VALE3 sobre VALE5). Resultado final: **205 tickers únicos**.
 
 **Schema:** `date: datetime64 | ticker: str | close: float64`
 
@@ -162,7 +189,7 @@ Este parquet é a **master key do universo**: qualquer dado de fundamentais ou f
 
 ### 3.2 `02_clean_fundamentals.py` → `cleaned/{metric}.parquet` (×9)
 
-Para cada CSV registrado em `FUNDAMENTAL_FILES`, lê via `read_economatica_wide()`, filtra tickers pelo universo de `prices.parquet`, filtra datas ≥ 2005-01-01, e aplica **winsorização train-only (Fix 2)**: os percentis 1% e 99% são calculados **exclusivamente no período de treino** (≤ 2018-12-31) e aplicados de forma consistente a todos os períodos (train/val/test). Elimina look-ahead bias.
+Para cada CSV registrado em `FUNDAMENTAL_FILES`, lê via `read_economatica_wide()`, filtra tickers pelo universo de `prices.parquet`, filtra datas ≥ 2005-01-01, e aplica **winsorização train-only (Fix 2)**: os percentis 1% e 99% são calculados **exclusivamente no período de treino** (≤ 2019-12-31) e aplicados de forma consistente a todos os períodos (train/val/test). Elimina look-ahead bias.
 
 **Outputs:** `cleaned/roa.parquet`, `cleaned/roe.parquet`, `cleaned/margem_bruta.parquet`, `cleaned/divida_bruta_ativo.parquet`, `cleaned/divida_liq_pl.parquet`, `cleaned/pvpa.parquet`, `cleaned/ev_ebitda.parquet`, `cleaned/preco_lucro.parquet`, `cleaned/volume.parquet`
 
@@ -249,15 +276,17 @@ Calcula log-returns para cada série de índice Bloomberg. Substitui ±Inf por N
 
 ### 5.1 Split Temporal
 
-Definido em `config.py`:
+Definido em `config.py` (Abril 2026, Fix 6b):
 
-| Split | Período | Uso |
-|---|---|---|
-| Train | 2005-01-04 → 2018-12-31 | Treino + estatísticas de normalização |
-| Validation | 2019-01-01 → 2022-12-31 | Early stopping |
-| Test | 2023-01-01 → fim dos dados | Avaliação final |
+| Split | Período | Uso | Características |
+|---|---|---|---|
+| Train | 2005-01-04 → 2019-12-31 | Treino + estatísticas de normalização | 15 anos, ~105 tickers médio, inclui COVID crash |
+| Validation | 2020-01-01 → 2022-12-31 | Validação e early stopping | 3 anos, pandemia inteira + bear market 2022 |
+| Test | 2023-01-01 → 2026-03-26 | Avaliação final out-of-sample | 3+ anos, recuperação pós-bear market |
 
 **Regra cardinal:** Todas as estatísticas de normalização ($\mu$, $\sigma$) são computadas **exclusivamente** no período de treino.
+
+**Mudança vs. anterior:** Anteriormente train era até 2017-12-31, val até 2021-12-31, test de 2022+. A mudança garante que: (1) modelo treina com volatilidade moderada (2005–2019) + COVID crash (Mar-2020); (2) validação confronta bear market 2022, testando robustez em regime adverso; (3) test é período de mercado mais calmo pós-recuperação.
 
 ### 5.2 `08_assemble_x_ts.py` → `parquets/x_ts.parquet` + `normalization_stats.json` + `parquets/prices.parquet`
 
@@ -334,6 +363,36 @@ Valida os artefatos finais com 6 verificações:
 6. **Alinhamento de datas:** Datas de `x_ts` devem ser subset das datas em `prices`
 
 O script retorna exit code 1 se houver falhas críticas.
+
+### 5.5 `processing/diagnostics.py` (Ferramenta de Análise)
+
+Script de diagnostics expandido em Abril 2026 (Fix 6b) com 4 seções:
+
+**Seção 1: Stocks Available Over Time + BOVESPA (Fix 6b)**
+- Subplot 1a: Contagem mensal de tickers ao longo do tempo, com train/val/test shaded em cores (laranja/vermelho/verde)
+- Subplot 1b: **Novo (Abril 2026):** Retornos acumulados do BOVESPA (^BVSP) com BOVESPA via yfinance, mesmas linhas train/val/test overlaid
+- Propósito: Visualizar se o dataset acompanha os ciclos de mercado e se a divisão temporal captura regimes diferentes
+- Output: `diagnostics_1_stocks_over_time.png`
+
+**Seção 2: Return Distribution (12 Cross-Sections)**
+- Histogramas de retornos em 12 datas evenly-spaced sobre o timeline completo
+- Calcula skew, kurtosis, compara com Normal
+- Classificação automática de cada data como train/val/test baseada em TRAIN_END/VAL_END
+
+**Seção 3 & 3b: Missing Data Rates**
+- Seção 3: Taxa de missing por série vs calendário completo (denominador = todas as linhas em prices.parquet)
+- Seção 3b: Taxa de missing apenas dentro da "janela ativa" de cada ticker (primeiro ao último non-NaN)
+- Ambas flagueam se > 10% missing, alertando para possíveis problemas de cobertura
+
+**Seção 4: Liquidity Filter Validation (Fix 6a)**
+- **Novo (Abril 2026):** Valida 100% conformidade com critério `VOL_MIN_FRAC_ABOVE = 0.90` e `VOL_THRESHOLD_K = 1_000`
+- Reporta tickers que NÃO passam (deve ser zero se filtro foi aplicado)
+- Garante auditabilidade
+
+**Seção 5: Weekend/Holiday Removal Check**
+- Verifica que nenhum fim de semana está presente em cleaned parquets
+- Breakdown dos dias NaN no raw CSV por dia-da-semana
+- Confirma que `read_economatica_wide()` removeu corretamente
 
 ---
 
@@ -559,15 +618,20 @@ O pipeline garante os seguintes invariantes nos arquivos finais:
 
 Onde $N_t$ varia por data (~200–400 ativos em datas típicas).
 
-### 7.6 Split Temporal para Treinamento
+### 7.6 Split Temporal para Treinamento (Atualizado Abril 2026)
 
-O dataset loader deve filtrar as datas disponíveis segundo o split:
+O dataset loader deve filtrar as datas disponíveis segundo o split **revisado (Fix 6b)**:
 
 ```python
-train_dates = all_dates[all_dates <= np.datetime64("2018-12-31")]
-val_dates   = all_dates[(all_dates > np.datetime64("2018-12-31")) & (all_dates <= np.datetime64("2022-12-31"))]
+train_dates = all_dates[all_dates <= np.datetime64("2019-12-31")]
+val_dates   = all_dates[(all_dates > np.datetime64("2019-12-31")) & (all_dates <= np.datetime64("2022-12-31"))]
 test_dates  = all_dates[all_dates > np.datetime64("2022-12-31")]
 ```
+
+**Alteração:** Anteriormente as datas eram 2017-12-31 e 2021-12-31. A mudança garante:
+- Train: 15 anos (2005–2019) com volatilidade moderada + COVID crash precoce (Mar 2020)
+- Val: 3 anos (2020–2022) capturando pandemia inteira e bear market 2022
+- Test: 3+ anos (2023–2026) período pós-bear market com mercado mais estabilizado
 
 A primeira data treinável efetiva não é 2005-01-04, mas ~2006-01 (256 dias úteis depois do início dos dados). O primeiro ano serve apenas para construir o lookback.
 
@@ -682,7 +746,7 @@ Extraídos de `normalization_stats.json` após re-execução completa do pipelin
 
 | Métrica | Valor |
 |---|---|
-| Período de treino | 2005-01-04 → 2018-12-31 |
+| Período de treino | 2005-01-04 → 2019-12-31 |
 | $\sigma_{train}$ (retornos) | 0.0489 |
 | $d_{ts}$ | 37 (1 ret + 9 fund + 2 comp + 25 índices, Fix 5b sem PCA) |
 | $d_{masks}$ | 40 (máscaras binárias de observação, Fix 5a) |

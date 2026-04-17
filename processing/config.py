@@ -14,8 +14,8 @@ for d in (CLEANED, FEATURES, PARQUETS):
     d.mkdir(exist_ok=True)
 
 # Temporal split boundaries
-TRAIN_END = "2017-12-31"
-VAL_END   = "2021-12-31"
+TRAIN_END = "2019-12-31"
+VAL_END   = "2022-12-31"
 MIN_DATE = "2005-01-03"
 
 # Fundamental files: internal name → (relative path from RAW_ECO, column name in long format)

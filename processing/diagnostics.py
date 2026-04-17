@@ -109,8 +109,8 @@ def check_stocks_over_time(prices: pd.DataFrame) -> None:
     # -- Subplot 1: Stock count --
     ax = axes[0]
     ax.plot(monthly.index, monthly.values, linewidth=1.2, color="steelblue", label="# stocks")
-    ax.axvline(TRAIN_END_TS, color="orange", linestyle="--", linewidth=1.5, alpha=0.8, label="train end (2017-12-31)")
-    ax.axvline(VAL_END_TS,   color="red",    linestyle="--", linewidth=1.5, alpha=0.8, label="val end (2021-12-31)")
+    ax.axvline(TRAIN_END_TS, color="orange", linestyle="--", linewidth=1.5, alpha=0.8, label="train end (2019-12-31)")
+    ax.axvline(VAL_END_TS,   color="red",    linestyle="--", linewidth=1.5, alpha=0.8, label="val end (2022-12-31)")
     ax.fill_between(monthly.index, monthly.min(), monthly.max(),
                      where=(monthly.index <= TRAIN_END_TS),
                      alpha=0.1, color="orange", label="train")
